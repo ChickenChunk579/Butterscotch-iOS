@@ -1,0 +1,35 @@
+#ifndef BUTTERSCOTCH_IOS_LAUNCHER_H
+#define BUTTERSCOTCH_IOS_LAUNCHER_H
+
+#include <stdbool.h>
+
+typedef struct IOSLaunchSettings {
+    bool lazyRooms;
+    bool lazyTextures;
+    bool lazyAudio;
+    bool touchControls;
+    double speedMultiplier;
+    float widescreenAspect;
+} IOSLaunchSettings;
+
+/*
+ * Builds and presents the UIKit launcher.
+ *
+ * UIKit itself is started by UIApplicationMain().
+ * This function does NOT start a run loop.
+ */
+int IOSLauncher_setupApp(int argc, char *argv[]);
+
+/*
+ * Starts an imported game through SDL.
+ *
+ * This is called by the UIKit launcher when the user selects a game.
+ */
+int IOSLauncher_startGame(const char *dataWinPath,
+                          const char *saveFolder,
+                          const IOSLaunchSettings *settings,
+                          const char *argv0);
+
+bool IOSLauncher_touchControlsEnabled(void);
+
+#endif

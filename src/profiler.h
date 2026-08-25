@@ -3,6 +3,7 @@
 
 #include <common.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "stdio_compat.h"
 
 // GML script profiler.

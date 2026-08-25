@@ -2,8 +2,8 @@
 #include "matrix_math.h"
 #include "text_utils.h"
 
-#if defined(__EMSCRIPTEN__) || defined(__ANDROID__)
-#include <GLES3/gl3.h>
+#if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(__APPLE__)
+#include <OpenGLES/ES3/gl.h>
 #elif PLATFORM_VITA
 #include <vitaGL.h>
 #include "vita_textures.h"
@@ -56,7 +56,7 @@ static const char* baseFragmentShader =
 // ===[ Runtime OpenGL extension checks ]===
 
 static bool hasFBO() {
-#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(__VITA__)
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(__VITA__) && !defined(__APPLE__)
     return glGenFramebuffers;
 #else
     return true;
@@ -64,7 +64,7 @@ static bool hasFBO() {
 }
 
 static bool hasVAO() {
-#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(__VITA__)
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(__VITA__) && !defined(__APPLE__)
     return glGenVertexArrays;
 #else
     return true;
@@ -88,13 +88,13 @@ char *fixShaderForVita(const char *src) {
     size_t cap = src_len * 2 + 64;
     char *out = malloc(cap);
     size_t out_len = 0;
-    if (!out) return NULL;
+    if (!out) return nullptr;
 
     #define ENSURE(n) do { \
     if (out_len + (size_t)(n) + 1 > cap) { \
         cap = (out_len + (size_t)(n) + 1) * 2; \
         char *tmp = realloc(out, cap); \
-        if (!tmp) { free(out); return NULL; } \
+        if (!tmp) { free(out); return nullptr; } \
             out = tmp; \
     } \
     } while (0)
@@ -265,7 +265,7 @@ static GLuint linkProgram(const char* name, uint32_t vertexAttributeCount, const
 
 static GLShaderUniform* getShaderUniform(GMLShader* shader, const char* name, GLenum type) {
     GLint location = glGetUniformLocation(shader->shaderId, name);
-    if (location < 0) return NULL;
+    if (location < 0) return nullptr;
 
     GLShaderUniform* uniform = (GLShaderUniform*) safeCalloc(1, sizeof(GLShaderUniform));
     uniform->location = location;
@@ -426,6 +426,14 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
     GLRenderer* gl = (GLRenderer*) renderer;
     renderer->dataWin = dataWin;
 
+    // SDL's UIKit backend presents a non-zero EAGL drawable framebuffer.
+    // Capture it while SDL's GL context is current; FBO 0 is not visible on
+    // iOS, unlike desktop OpenGL.
+    GLint hostFramebuffer = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &hostFramebuffer);
+    gl->hostFramebuffer = (GLuint) hostFramebuffer;
+    logInfo("GL: host framebuffer is %u\n", gl->hostFramebuffer);
+
     Matrix4f world;
     Matrix4f_identity(&world);
     renderer->gmlMatrices[MATRIX_WORLD] = world;
@@ -439,7 +447,7 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
     gl->isGL3 = (ver.major >= 3);
     gl->isGLES = ver.isGLES;
 
-#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(PLATFORM_VITA)
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__) && !defined(PLATFORM_VITA) && !defined(__APPLE__)
     gl_init_wrappers();
 #endif
 
@@ -2758,7 +2766,7 @@ static void glShaderSetUniformF(Renderer* renderer, int32_t handle, int32_t coun
 static void glShaderSetUniformFArray(Renderer* renderer, int32_t handle, float* values, uint32_t count) {
     GLRenderer* gl = (GLRenderer*) renderer;
     flushBatch(gl);
-    if (handle == -1 || renderer->currentShader == -1 || values == NULL || count == 0) return;
+    if (handle == -1 || renderer->currentShader == -1 || values == nullptr || count == 0) return;
 
     GMLShader* shader = &gl->gmlShaders[renderer->currentShader];
     GLenum type = glShaderGetUniformTypeByLocation(shader, handle);
@@ -2821,7 +2829,7 @@ static uint32_t glSpriteGetTexture(Renderer* renderer, int32_t tpagIndex) {
 }
 
 // Decode a texture handle produced by glSpriteGetTexture (sprite/tpag) or glSurfaceGetTexture (surface)
-// back into its GL id and pixel size. *outTpag is set to NULL for surface handles (no tpag sub-region).
+// back into its GL id and pixel size. *outTpag is set to nullptr for surface handles (no tpag sub-region).
 // Returns false for the 0 ("no texture") handle or an unresolvable one.
 static bool glResolveTextureHandle(GLRenderer* gl, uint32_t texHandle, TexturePageItem** outTpag, GLuint* outTexId, int32_t* outTexW, int32_t* outTexH) {
     if (texHandle == 0) return false;

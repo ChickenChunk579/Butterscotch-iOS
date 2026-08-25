@@ -9,10 +9,60 @@
 #include "gettime.h"
 #include "runner_mouse.h"
 
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+#include "touch_controls.h"
+#include "launcher_c.h"
+#endif
+
+static uint64_t fpsLastTime = 0;
+static uint32_t fpsFrames = 0;
+
 static Runner *g_runner;
 static SDL_Surface* scr;
 static SDL_Window *window;
 static SDL_GameController* openControllers[MAX_GAMEPADS];
+
+static void platformUpdateFPS(void) {
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+    fpsFrames++;
+
+    uint64_t now = SDL_GetPerformanceCounter();
+
+    if (fpsLastTime == 0) {
+        fpsLastTime = now;
+        return;
+    }
+
+    uint64_t frequency = SDL_GetPerformanceFrequency();
+    double elapsed = (double)(now - fpsLastTime) / (double)frequency;
+
+    if (elapsed >= 0.5) {
+        double fps = (double)fpsFrames / elapsed;
+
+        IOSTouchControls_setFPS(fps);
+
+        fpsFrames = 0;
+        fpsLastTime = now;
+    }
+#endif
+}
+
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+static void platformTouchControlKeyChanged(int32_t key, bool down) {
+    if (!g_runner) return;
+    if (down)
+        RunnerKeyboard_onKeyDown(g_runner->keyboard, key);
+    else
+        RunnerKeyboard_onKeyUp(g_runner->keyboard, key);
+}
+
+static void platformTouchControlExit(void) {
+    SDL_Event event;
+    SDL_zero(event);
+    event.type = SDL_QUIT;
+    SDL_PushEvent(&event);
+}
+#endif
 
 static SDL_Window *tryOpenWindow(int reqW, int reqH, const char* title, Uint32 flags) {
     if (gfx == SOFTWARE) {
@@ -43,7 +93,7 @@ static SDL_Window *tryOpenWindow(int reqW, int reqH, const char* title, Uint32 f
             }
             SDL_DestroyWindow(newWindow);
         }
-        return NULL;
+        return nullptr;
     }
     for (size_t i = 0; i < sizeof(GLCommon_versions)/sizeof(GLCommon_versions[0]); i++) {
         SDL_Window *newWindow;
@@ -87,7 +137,7 @@ static SDL_Window *tryOpenWindow(int reqW, int reqH, const char* title, Uint32 f
             SDL_DestroyWindow(newWindow);
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 void platformSetWindowTitle(const char* title) {
@@ -119,6 +169,12 @@ bool platformGetWindowSize(int32_t* outW, int32_t* outH) {
 
 bool platformGetScaledWindowSize(int32_t* outW, int32_t* outH) {
     if (!outW || !outH) return false;
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+    // UIKit SDL windows are always fullscreen. SDL_GetWindowSize() reports
+    // the requested logical size (commonly 640x480), not the drawable size;
+    // using it here makes the renderer occupy only a small box on screen.
+    return platformGetWindowSize(outW, outH);
+#else
     int w = 0;
     int h = 0;
     SDL_GetWindowSize(window, &w, &h);
@@ -126,6 +182,7 @@ bool platformGetScaledWindowSize(int32_t* outW, int32_t* outH) {
     *outW = w;
     *outH = h;
     return true;
+#endif
 }
 
 static float platformGetWindowScale(void) {
@@ -161,24 +218,32 @@ static bool platformGetWindowFocus(void) {
 
 bool platformInit(int reqW, int reqH, const char *title, bool headless) {
     // Init SDL
+
+    #ifdef BUTTERSCOTCH_PLATFORM_IOS
+    SDL_SetMainReady();
+    #endif
+
     if (SDL_Init(SDL_INIT_VIDEO|SDL_INIT_TIMER|SDL_INIT_GAMECONTROLLER)) {
         logError("Failed to initialize SDL\n");
         return false;
     }
 
     for (int i = 0; i < MAX_GAMEPADS; i++) {
-        openControllers[i] = NULL;
+        openControllers[i] = nullptr;
     }
 
     Uint32 flags = 0;
-    if (gfx != SOFTWARE)
-        flags |= SDL_WINDOW_OPENGL;
+
+if (gfx != SOFTWARE)
+    flags |= SDL_WINDOW_OPENGL;
+
     if (headless)
         flags |= SDL_WINDOW_HIDDEN;
     else
         flags |= SDL_WINDOW_RESIZABLE;
+
 #if SDL_VERSION_ATLEAST(2, 0, 1)
-    flags |= SDL_WINDOW_ALLOW_HIGHDPI;
+flags |= SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 
     window = tryOpenWindow(reqW, reqH, title, flags);
@@ -218,6 +283,12 @@ bool platformInit(int reqW, int reqH, const char *title, bool headless) {
     // If we don't do this, the window will be larger than it should be on HiDPI displays.
     platformSetWindowSize(reqW, reqH);
 
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+    IOSTouchControls_install(window, platformTouchControlKeyChanged,
+                             platformTouchControlExit,
+                             IOSLauncher_touchControlsEnabled(), IOSLauncher_showFPSEnabled());
+#endif
+
 #ifndef PLATFORM_VITA
     // init gamepad mappings
     const char* dbPath = "gamecontrollerdb.txt";
@@ -232,10 +303,13 @@ bool platformInit(int reqW, int reqH, const char *title, bool headless) {
 }
 
 void platformExit(void) {
+#ifdef BUTTERSCOTCH_PLATFORM_IOS
+    IOSTouchControls_remove();
+#endif
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (openControllers[i]) {
             SDL_GameControllerClose(openControllers[i]);
-            openControllers[i] = NULL;
+            openControllers[i] = nullptr;
         }
     }
     SDL_Quit();
@@ -279,12 +353,12 @@ void platformInitFunctions(Runner *runner) {
 
 #ifdef ENABLE_SW_RENDERER
 
-static SDL_Surface* nextFb = NULL;
+static SDL_Surface* nextFb = nullptr;
 
 void Runner_setNextFrame(uint32_t* framebuffer, int width, int height) {
     if (nextFb) {
         SDL_FreeSurface(nextFb);
-        nextFb = NULL;
+        nextFb = nullptr;
     }
 
     nextFb = SDL_CreateRGBSurfaceFrom(
@@ -305,14 +379,17 @@ void Runner_setNextFrame(uint32_t* framebuffer, int width, int height) {
 void platformSwapBuffers(void) {
 #ifdef ENABLE_SW_RENDERER
     if(gfx == SOFTWARE) {
-        SDL_BlitSurface(nextFb, NULL, scr, NULL);
+        SDL_BlitSurface(nextFb, nullptr, scr, nullptr);
         SDL_UpdateWindowSurface(window);
     }
 #endif
+
 #if defined(ENABLE_LEGACY_GL) || defined(ENABLE_MODERN_GL)
     if (gfx == LEGACY_GL || gfx == MODERN_GL)
         SDL_GL_SwapWindow(window);
 #endif
+
+    platformUpdateFPS();
 }
 
 #if defined(ENABLE_MODERN_GL) || defined(ENABLE_LEGACY_GL)
@@ -494,7 +571,7 @@ bool platformHandleEvents(void) {
             case SDL_CONTROLLERDEVICEADDED: {
                 int device_index = e.cdevice.which;
                 for (int i = 0; i < MAX_GAMEPADS; i++) {
-                    if (openControllers[i] == NULL) {
+                    if (openControllers[i] == nullptr) {
                         openControllers[i] = SDL_GameControllerOpen(device_index);
                         break;
                     }
@@ -508,7 +585,7 @@ bool platformHandleEvents(void) {
                         SDL_Joystick* joy = SDL_GameControllerGetJoystick(openControllers[i]);
                         if (joy && SDL_JoystickInstanceID(joy) == instance_id) {
                             SDL_GameControllerClose(openControllers[i]);
-                            openControllers[i] = NULL;
+                            openControllers[i] = nullptr;
                             break;
                         }
                     }
@@ -540,7 +617,7 @@ bool platformHandleEvents(void) {
             slot->jid = slotIdx;
 
             const char* name = SDL_GameControllerName(gc);
-            if (name != NULL) {
+            if (name != nullptr) {
                 strncpy(slot->description, name, sizeof(slot->description) - 1);
                 slot->description[sizeof(slot->description) - 1] = '\0';
             } else {
@@ -566,7 +643,7 @@ bool platformHandleEvents(void) {
         } else {
             if (gc) {
                 SDL_GameControllerClose(gc);
-                openControllers[slotIdx] = NULL;
+                openControllers[slotIdx] = nullptr;
             }
             slot->connected = false;
             slot->guid[0] = '\0';
@@ -586,3 +663,6 @@ void platformSleepUntil(uint64_t time) {
         YIELD();
     }
 }
+
+
+

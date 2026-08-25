@@ -36,11 +36,11 @@
 
 #define forEach(type, item, array, count) \
     for (TYPEOF(count) item##_i_ = 0; item##_i_ < (count); ++item##_i_) \
-    for (type* item = &(array)[item##_i_]; item; item = NULL)
+    for (type* item = &(array)[item##_i_]; item; item = nullptr)
 
 #define forEachIndexed(type, item, index, array, count) \
     for (TYPEOF(count) index = 0; index < (count); ++index) \
-    for (type* item = &(array)[index]; item; item = NULL)
+    for (type* item = &(array)[index]; item; item = nullptr)
 
 #define repeat(n, it) for (TYPEOF(n) it = 0; it < (n); ++it)
 
@@ -184,7 +184,7 @@ static inline int32_t Color_lerp(int32_t color1, int32_t color2, float blending)
 
 #define shcopyFromTo(src, dst)                        \
 do {                                        \
-(dst) = NULL;                           \
+(dst) = nullptr;                           \
 for (int i = 0; i < shlen(src); i++)    \
 shput((dst), (src)[i].key, (src)[i].value); \
 } while (0)
