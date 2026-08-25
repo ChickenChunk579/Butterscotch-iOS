@@ -13,7 +13,7 @@ struct AboutView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("commit 5330e02")
+            Text("commit \(BuildInfo.commitHash)")
                 .font(.footnote)
                 .fontWeight(.light)
 
