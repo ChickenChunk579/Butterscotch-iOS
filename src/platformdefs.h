@@ -139,6 +139,8 @@ void platformSleepUntil(uint64_t time);
 
 #ifdef ENABLE_METAL
 void *platformGetMetalLayer(void);
+void MetalRenderer_presentFrame(void);
+void MetalRenderer_waitForPresentedFrame(void);
 #endif
 
 extern InputRecording *globalInputRecording;

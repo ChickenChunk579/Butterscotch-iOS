@@ -1277,8 +1277,10 @@ int loop(CommandLineArgs args, const char *argv0) {
                 }
 
                 // Only swap when there isn't a room change to match the original runner.
-                if (runner->pendingRoom == -1)
+                if (runner->pendingRoom == -1 || gfx == METAL)
                     platformSwapBuffers();
+                if (runner->pendingRoom != -1 && gfx == METAL)
+                    MetalRenderer_waitForPresentedFrame();
                 Runner_handlePendingRoomChange(runner);
             }
 

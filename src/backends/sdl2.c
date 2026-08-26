@@ -417,6 +417,11 @@ void platformSwapBuffers(void) {
         SDL_GL_SwapWindow(window);
 #endif
 
+#ifdef ENABLE_METAL
+    if (gfx == METAL)
+        MetalRenderer_presentFrame();
+#endif
+
     platformUpdateFPS();
 }
 
