@@ -7,10 +7,21 @@ struct GamesView: View {
     @ObservedObject
     private var store = GameStore.shared
 
-    @State private var showingImporter = false
     @State private var editingGame: Game?
     @State private var showingEditor = false
+    @State private var isExportingSaves = false
     @State private var errorMessage: String?
+    @State private var successMessage: String?
+
+    private enum ImportMode {
+        case game
+        case saves
+    }
+
+    @State private var importMode: ImportMode?
+    @State private var isPresentingImporter = false
+    @State private var backupDocument: SaveBackupDocument?
+    @State private var targetGame: Game?
 
     var body: some View {
 
@@ -51,6 +62,18 @@ struct GamesView: View {
                                         showingEditor = true
                                     }
                                     .tint(BSTheme.accent)
+
+                                    Button("Backup Saves") {
+                                        targetGame = game
+                                        backupDocument = GameStore.shared.prepareBackupDocument(for: game)
+                                        isExportingSaves = true
+                                    }
+
+                                    Button("Import Saves") {
+                                        targetGame = game
+                                        importMode = .saves
+                                        isPresentingImporter = true
+                                    }
                                 }
                         }
                     }
@@ -65,24 +88,61 @@ struct GamesView: View {
                 ) {
 
                     Button {
-                        showingImporter = true
+                        importMode = .game
+                        isPresentingImporter = true
                     } label: {
                         Image(systemName: "plus")
                     }
                 }
             }
             .fileImporter(
-                isPresented: $showingImporter,
-                allowedContentTypes: [
-                    .zip
-                ],
+                isPresented: $isPresentingImporter,
+                allowedContentTypes: {
+                    switch importMode {
+                    case .game:
+                        return [UTType.zip]
+
+                    case .saves:
+                        return [UTType.folder]
+
+                    case nil:
+                        return []
+                    }
+                }(),
                 allowsMultipleSelection: false
             ) { result in
 
-                handleImport(result)
+                let mode = importMode
+                importMode = nil
+
+                switch mode {
+
+                case .game:
+                    handleImport(result)
+
+                case .saves:
+                    handleSaveFolderImport(result)
+
+                case nil:
+                    break
+                }
+            }
+            .fileExporter(
+                isPresented: $isExportingSaves,
+                document: backupDocument,
+                contentType: .zip,
+                defaultFilename: "\(targetGame?.name ?? "Game")_Saves.zip"
+            ) { result in
+                if case .failure(let error) = result {
+                    print("Export error: \(error.localizedDescription)")
+                }
+                targetGame = nil
             }
             .sheet(
-                isPresented: $showingEditor
+                isPresented: $showingEditor,
+                onDismiss: {
+                    editingGame = nil
+                }
             ) {
 
                 if let editingGame {
@@ -91,6 +151,25 @@ struct GamesView: View {
                         game: editingGame
                     )
                 }
+            }
+            .alert(
+                "Saves Imported",
+                isPresented: Binding(
+                    get: {
+                        successMessage != nil
+                    },
+                    set: {
+                        if !$0 {
+                            successMessage = nil
+                        }
+                    }
+                )
+            ) {
+                Button("OK") {
+                    successMessage = nil
+                }
+            } message: {
+                Text(successMessage ?? "")
             }
             .alert(
                 "Error",
@@ -290,6 +369,10 @@ struct GamesView: View {
 
                 store.add(game)
 
+                // Open the metadata editor immediately after a
+                // successful import so the user can name/describe
+                // the game and (if the editor supports it) pick
+                // an icon before it shows up in the library.
                 editingGame = game
                 showingEditor = true
             }
@@ -389,5 +472,46 @@ struct GamesView: View {
         _ message: String
     ) {
         errorMessage = message
+    }
+
+    private func handleSaveFolderImport(
+        _ result: Result<[URL], Error>
+    ) {
+
+        guard let game = targetGame else {
+            return
+        }
+
+        defer {
+            targetGame = nil
+        }
+
+        switch result {
+
+        case .success(let urls):
+
+            guard let selectedURL = urls.first else {
+                return
+            }
+
+            let success =
+                store.importSaveFolder(
+                    from: selectedURL,
+                    for: game
+                )
+
+            if success {
+                successMessage =
+                    "Your save files were imported successfully."
+            } else {
+                errorMessage =
+                    "Could not import the selected save folder."
+            }
+
+        case .failure(let error):
+
+            errorMessage =
+                "Save import failed: \(error.localizedDescription)"
+        }
     }
 }

@@ -222,3 +222,153 @@ bool IOSZipImport_extract(const char *zipPath, const char *destinationDirectory,
 
     return true;
 }
+
+bool IOSZipImport_extractDirectory(
+    const char *zipPath,
+    const char *destinationDirectory,
+    char *error,
+    size_t errorSize
+) {
+    mz_zip_archive archive;
+    memset(&archive, 0, sizeof(archive));
+
+    if (!mz_zip_reader_init_file(&archive, zipPath, 0)) {
+        setError(error, errorSize, "This is not a readable ZIP file.");
+        return false;
+    }
+
+    mz_uint count = mz_zip_reader_get_num_files(&archive);
+
+    if (count == 0 || count > ZIP_MAX_ENTRIES) {
+        setError(error, errorSize, "The ZIP has too many files.");
+        mz_zip_reader_end(&archive);
+        return false;
+    }
+
+    if (!makeDirectories(destinationDirectory)) {
+        setError(error, errorSize, "Could not create the destination folder.");
+        mz_zip_reader_end(&archive);
+        return false;
+    }
+
+    uint64_t totalSize = 0;
+
+    for (mz_uint index = 0; index < count; ++index) {
+
+        mz_zip_archive_file_stat stat;
+
+        if (!mz_zip_reader_file_stat(
+                &archive,
+                index,
+                &stat
+        )) {
+            setError(error, errorSize, "Could not inspect a ZIP entry.");
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        if (stat.m_is_directory) {
+            continue;
+        }
+
+        if (!safeArchivePath(stat.m_filename)) {
+            setError(
+                error,
+                errorSize,
+                "The ZIP contains an unsafe file path."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        totalSize += stat.m_uncomp_size;
+
+        if (totalSize > ZIP_MAX_UNCOMPRESSED) {
+            setError(
+                error,
+                errorSize,
+                "The ZIP expands to more than 1 GB."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        char destination[4096];
+
+        if (snprintf(
+                destination,
+                sizeof(destination),
+                "%s/%s",
+                destinationDirectory,
+                stat.m_filename
+        ) >= (int)sizeof(destination)) {
+
+            setError(
+                error,
+                errorSize,
+                "A ZIP path is too long."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        char parent[4096];
+
+        strncpy(
+            parent,
+            destination,
+            sizeof(parent)
+        );
+
+        parent[sizeof(parent) - 1] = '\0';
+
+        char *slash = strrchr(parent, '/');
+
+        if (!slash) {
+            setError(
+                error,
+                errorSize,
+                "Invalid ZIP path."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        *slash = '\0';
+
+        if (!makeDirectories(parent)) {
+            setError(
+                error,
+                errorSize,
+                "Could not create a save directory."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+
+        if (!mz_zip_reader_extract_to_file(
+                &archive,
+                index,
+                destination,
+                0
+        )) {
+            setError(
+                error,
+                errorSize,
+                "Could not extract a save file."
+            );
+
+            mz_zip_reader_end(&archive);
+            return false;
+        }
+    }
+
+    mz_zip_reader_end(&archive);
+
+    return true;
+}

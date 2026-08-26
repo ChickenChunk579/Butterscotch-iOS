@@ -46,6 +46,9 @@ find_library(IOS_PHOTOS_FRAMEWORK Photos REQUIRED)
 find_library(IOS_PHOTOSUI_FRAMEWORK PhotosUI REQUIRED)
 find_library(IOS_UNIFORMTYPEIDENTIFIERS_FRAMEWORK UniformTypeIdentifiers REQUIRED)
 find_library(IOS_GAMECONTROLLER_FRAMEWORK GameController)
+find_library(IOS_VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+find_library(IOS_Z_LIBRARY z REQUIRED)
+find_library(IOS_ICONV_LIBRARY iconv REQUIRED)
 
 # Compiler
 set(CMAKE_C_STANDARD 99)
@@ -181,6 +184,71 @@ target_include_directories(miniz SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/vendor/miniz
 )
 
+# FFmpeg
+set(FFMPEG_URL
+    https://github.com/kewlbear/FFmpeg-iOS/releases/download/v0.0.6-b20230416-173821
+)
+
+set(FFMPEG_DIR "${CMAKE_BINARY_DIR}/ffmpeg")
+
+file(MAKE_DIRECTORY "${FFMPEG_DIR}")
+
+file(DOWNLOAD
+    "${FFMPEG_URL}/avcodec.zip"
+    "${FFMPEG_DIR}/avcodec.zip"
+    SHOW_PROGRESS
+)
+
+file(DOWNLOAD
+    "${FFMPEG_URL}/avformat.zip"
+    "${FFMPEG_DIR}/avformat.zip"
+    SHOW_PROGRESS
+)
+
+file(DOWNLOAD
+    "${FFMPEG_URL}/avutil.zip"
+    "${FFMPEG_DIR}/avutil.zip"
+    SHOW_PROGRESS
+)
+
+file(DOWNLOAD
+    "${FFMPEG_URL}/swscale.zip"
+    "${FFMPEG_DIR}/swscale.zip"
+    SHOW_PROGRESS
+)
+
+file(DOWNLOAD
+    "${FFMPEG_URL}/swresample.zip"
+    "${FFMPEG_DIR}/swresample.zip"
+    SHOW_PROGRESS
+)
+
+file(ARCHIVE_EXTRACT
+    INPUT "${FFMPEG_DIR}/avcodec.zip"
+    DESTINATION "${FFMPEG_DIR}/avcodec"
+)
+
+file(ARCHIVE_EXTRACT
+    INPUT "${FFMPEG_DIR}/avformat.zip"
+    DESTINATION "${FFMPEG_DIR}/avformat"
+)
+
+file(ARCHIVE_EXTRACT
+    INPUT "${FFMPEG_DIR}/avutil.zip"
+    DESTINATION "${FFMPEG_DIR}/avutil"
+)
+
+file(ARCHIVE_EXTRACT
+    INPUT "${FFMPEG_DIR}/swscale.zip"
+    DESTINATION "${FFMPEG_DIR}/swscale"
+)
+
+file(ARCHIVE_EXTRACT
+    INPUT "${FFMPEG_DIR}/swresample.zip"
+    DESTINATION "${FFMPEG_DIR}/swresample"
+)
+
+
 add_library(stb_ds INTERFACE)
 target_include_directories(stb_ds SYSTEM INTERFACE
     ${CMAKE_SOURCE_DIR}/vendor/stb/ds
@@ -257,6 +325,14 @@ target_link_libraries(butterscotch PRIVATE
     ${IOS_PHOTOS_FRAMEWORK}
     ${IOS_PHOTOSUI_FRAMEWORK}
     ${IOS_UNIFORMTYPEIDENTIFIERS_FRAMEWORK}
+    ${IOS_VIDEOTOOLBOX_FRAMEWORK}
+    ${IOS_Z_LIBRARY}
+    ${IOS_ICONV_LIBRARY}
+    "${FFMPEG_DIR}/avcodec/avcodec.xcframework"
+    "${FFMPEG_DIR}/avformat/avformat.xcframework"
+    "${FFMPEG_DIR}/avutil/avutil.xcframework"
+    "${FFMPEG_DIR}/swscale/swscale.xcframework"
+    "${FFMPEG_DIR}/swresample/swresample.xcframework"
 )
 
 if(IOS_GAMECONTROLLER_FRAMEWORK)

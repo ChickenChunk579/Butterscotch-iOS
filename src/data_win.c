@@ -1,5 +1,6 @@
 #include "data_win.h"
 #include "binary_reader.h"
+#include "globals.h"
 
 #include <stdbool.h>
 #include "stdio_compat.h"
@@ -2716,8 +2717,27 @@ void DataWin_loadAudoIfNeeded(DataWin* dw, uint32_t audioEntryId) {
 }
 
 // ===[ MAIN PARSE FUNCTION ]===
-
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
+    strncpy(gamePath, filePath, sizeof(gamePath) - 1);
+    gamePath[sizeof(gamePath) - 1] = '\0';
+
+    char* lastSlash = strrchr(gamePath, '/');
+
+#ifdef _WIN32
+    char* lastBackslash = strrchr(gamePath, '\\');
+    if (!lastSlash || (lastBackslash && lastBackslash > lastSlash)) {
+        lastSlash = lastBackslash;
+    }
+#endif
+
+    if (lastSlash) {
+        *lastSlash = '\0';
+    } else {
+        strcpy(gamePath, ".");
+    }
+
+
+    
     FILE* file = fopen(filePath, "rb");
     if (!file) {
         logError("Failed to open file: %s\n", filePath);

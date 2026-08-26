@@ -11,4 +11,11 @@ bool IOSZipImport_extract(const char *zipPath, const char *destinationDirectory,
                           char *outDataWinPath, size_t outDataWinPathSize,
                           char *error, size_t errorSize);
 
+bool IOSZipImport_extractDirectory(
+    const char *zipPath,
+    const char *destinationDirectory,
+    char *error,
+    size_t errorSize
+);
+
 #endif

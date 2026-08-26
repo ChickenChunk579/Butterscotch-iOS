@@ -325,4 +325,166 @@ final class GameStore: ObservableObject {
             )
         }
     }
+
+    // MARK: - Save Backup & Restore
+
+    /// Prepares a FileWrapper of the game's save directory to be exported as a ZIP
+    func prepareBackupDocument(for game: Game) -> SaveBackupDocument? {
+        let saveURL = saveDirectoryURL(for: game)
+        
+        // Ensure the save directory actually exists before zipping
+        if !FileManager.default.fileExists(atPath: saveURL.path) {
+            try? FileManager.default.createDirectory(at: saveURL, withIntermediateDirectories: true)
+        }
+        
+        do {
+            // FileWrapper automatically archives folders when processed by .fileExporter
+            let directoryWrapper = try FileWrapper(url: saveURL, options: [])
+            return SaveBackupDocument(directoryWrapper: directoryWrapper)
+        } catch {
+            print("Error preparing backup wrapper: \(error)")
+            return nil
+        }
+    }
+
+    /// Extracted imported ZIP file wrapper into the game's save directory
+    func importBackup(
+        from zipURL: URL,
+        for game: Game
+    ) -> Bool {
+
+        let saveURL = saveDirectoryURL(for: game)
+        let fileManager = FileManager.default
+
+        do {
+
+            if fileManager.fileExists(atPath: saveURL.path) {
+                try fileManager.removeItem(at: saveURL)
+            }
+
+            try fileManager.createDirectory(
+                at: saveURL,
+                withIntermediateDirectories: true
+            )
+
+            var errorBuffer = [CChar](
+                repeating: 0,
+                count: 512
+            )
+
+            let extracted =
+                IOSZipImport_extractDirectory(
+                    zipURL.path,
+                    saveURL.path,
+                    &errorBuffer,
+                    errorBuffer.count
+                )
+
+            guard extracted else {
+
+                let message =
+                    String(cString: errorBuffer)
+
+                print(
+                    "Save import failed: \(message)"
+                )
+
+                return false
+            }
+
+            objectWillChange.send()
+
+            return true
+
+        } catch {
+
+            print(
+                "Error importing backup: \(error)"
+            )
+
+            return false
+        }
+    }
+
+    func importSaveFolder(
+        from sourceURL: URL,
+        for game: Game
+    ) -> Bool {
+
+        let fileManager = FileManager.default
+        let saveURL = saveDirectoryURL(for: game)
+
+        let accessing =
+            sourceURL.startAccessingSecurityScopedResource()
+
+        defer {
+            if accessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            var isDirectory: ObjCBool = false
+
+            guard fileManager.fileExists(
+                atPath: sourceURL.path,
+                isDirectory: &isDirectory
+            ),
+            isDirectory.boolValue else {
+                print("Selected save backup is not a folder.")
+                return false
+            }
+
+            // Make sure the destination exists.
+            try fileManager.createDirectory(
+                at: saveURL,
+                withIntermediateDirectories: true
+            )
+
+            // Remove the existing saves.
+            let existingItems =
+                try fileManager.contentsOfDirectory(
+                    at: saveURL,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                )
+
+            for item in existingItems {
+                try fileManager.removeItem(at: item)
+            }
+
+            // Copy the selected folder's contents into Saves/.
+            let importedItems =
+                try fileManager.contentsOfDirectory(
+                    at: sourceURL,
+                    includingPropertiesForKeys: nil,
+                    options: []
+                )
+
+            for item in importedItems {
+
+                let destination =
+                    saveURL.appendingPathComponent(
+                        item.lastPathComponent,
+                        isDirectory: item.hasDirectoryPath
+                    )
+
+                try fileManager.copyItem(
+                    at: item,
+                    to: destination
+                )
+            }
+
+            objectWillChange.send()
+
+            return true
+
+        } catch {
+            print(
+                "Save folder import failed: \(error)"
+            )
+
+            return false
+        }
+    }
 }
