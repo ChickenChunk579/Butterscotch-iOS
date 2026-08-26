@@ -4,6 +4,7 @@
 
 #import "launcher.h"
 #import "zip_import.h"
+#import "touch_controls.h"
 
 void IOSLauncherStartGameFromSwift(
     NSString *dataWinPath,

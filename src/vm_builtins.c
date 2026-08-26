@@ -16980,6 +16980,7 @@ static RValue builtin_gpu_set_alphatestref(VMContext* ctx, RValue* args, int32_t
 }
 
 static RValue builtin_gpu_set_fog(VMContext* ctx, RValue* args, int32_t argCount) {
+    logInfo("VM gpu_set_fog called: argc=%d\n", argCount);
     bool enable;
     int32_t color;
     if (argCount == 1 && args[0].type == RVALUE_ARRAY && args[0].array != nullptr && GMLArray_length1D(args[0].array) >= 2) {

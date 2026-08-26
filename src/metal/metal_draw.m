@@ -118,14 +118,27 @@ void metalDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y
     MetalRenderer* metal = (MetalRenderer*)renderer;
     TexturePageItem* tpag;
     uint32_t pageId;
-    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
+
+    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) ||
+        !metalEnsureTextureLoaded(metal, pageId))
+        return;
+
     float invW = 1.0f / (float)metal->textureWidths[pageId];
     float invH = 1.0f / (float)metal->textureHeights[pageId];
-    metalDrawQuadRaw(metal, metal->textures[pageId], x1, y1, x2, y2, x3, y3, x4, y4,
-                     0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, alpha,
-                     tpag->sourceX * invW, tpag->sourceY * invH,
-                     (tpag->sourceX + tpag->sourceWidth) * invW,
-                     (tpag->sourceY + tpag->sourceHeight) * invH);
+
+    uint32_t color = metal->base.drawColor;
+
+    metalDrawQuadRaw(
+        metal,
+        metal->textures[pageId],
+        x1, y1, x2, y2, x3, y3, x4, y4,
+        color, color, color, color,
+        alpha,
+        tpag->sourceX * invW,
+        tpag->sourceY * invH,
+        (tpag->sourceX + tpag->sourceWidth) * invW,
+        (tpag->sourceY + tpag->sourceHeight) * invH
+    );
 }
 
 void metalDrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY,

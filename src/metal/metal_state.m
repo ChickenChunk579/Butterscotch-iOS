@@ -120,6 +120,10 @@ void metalGpuSetFog(Renderer* renderer, bool enable, uint32_t color) {
     MetalRenderer* metal = (MetalRenderer*)renderer;
     metal->fogEnable = enable;
     metal->fogColor = color;
+
+    logInfo("METAL gpuSetFog: enable=%d color=%08x\n",
+            enable, color);
+
 }
 
 bool metalResolveTextureHandle(MetalRenderer* metal, uint32_t texHandle, TexturePageItem** outTpag,
