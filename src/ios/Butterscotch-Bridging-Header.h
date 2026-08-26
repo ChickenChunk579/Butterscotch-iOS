@@ -14,5 +14,6 @@ void IOSLauncherStartGameFromSwift(
     BOOL touchControls,
     BOOL showFPS,
     double speedMultiplier,
-    float widescreenAspect
+    float widescreenAspect,
+    int rendererId
 );

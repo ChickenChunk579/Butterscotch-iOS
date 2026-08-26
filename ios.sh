@@ -26,12 +26,13 @@ cmake -S . -B build-ios-simulator \
 cmake -S . -B build-ios \
   -GXcode \
   -DBACKEND=sdl2 \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
   -DENABLE_LEGACY_GL=OFF \
-  -DENABLE_MODERN_GL=OFF \
+  -DENABLE_MODERN_GL=ON \
   -DENABLE_METAL=ON \
   -DAUDIO_BACKEND=miniaudio
 
@@ -43,6 +44,6 @@ cmake -S . -B build-ios-simulator \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
   -DENABLE_LEGACY_GL=OFF \
-  -DENABLE_MODERN_GL=OFF \
+  -DENABLE_MODERN_GL=ON \
   -DENABLE_METAL=ON \
   -DAUDIO_BACKEND=miniaudio

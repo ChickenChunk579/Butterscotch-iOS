@@ -56,6 +56,9 @@ struct SettingsView: View {
     @AppStorage("ios.opcodeProfiler")
     private var opcodeProfiler = false
 
+    @AppStorage("ios.metal")
+    private var metal = true;
+
     // MARK: - Debugging
 
     @AppStorage("ios.debug")
@@ -254,6 +257,52 @@ struct SettingsView: View {
                             .tag(3.0)
                     }
                     .pickerStyle(.segmented)
+
+                    
+
+                }
+
+                Section("Graphics") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(
+                            "Metal",
+                            isOn: $metal
+                        )
+                        Text("* Experimental")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("* Graphical glitches may occur.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("* Better performance")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                    }
+    
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(
+                            "OpenGL ES",
+                            isOn: Binding(
+                                get: { !metal },
+                                set: { newValue in metal = !newValue }
+                            )
+                        )
+                        Text("* Legacy - will be removed from iOS soon")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Text("* Better compatibility")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        Text("* Unless using Simulator, no graphical glitches")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        
+                    }
                 }
 
                 // MARK: Debugging

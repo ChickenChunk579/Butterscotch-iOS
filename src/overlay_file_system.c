@@ -63,6 +63,93 @@ static bool pathExists(const char* fullPath) {
     return stat(fullPath, &st) == 0;
 }
 
+#ifdef _WIN32
+static char* joinPathCaseInsensitive(const char* basePath, const char* normalizedPath) {
+    return joinPath(basePath, normalizedPath);
+}
+#else
+static char* joinPathCaseInsensitive(const char* basePath, const char* normalizedPath) {
+    char* full = joinPath(basePath, normalizedPath);
+    if (pathExists(full) || isAbsolute(normalizedPath)) return full;
+
+    char* resolved = safeStrdup(basePath);
+    char* relCopy = safeStrdup(normalizedPath);
+    char* saveptr = nullptr;
+    char* token = strtok_r(relCopy, "/", &saveptr);
+    
+    bool failed = false;
+    while (token != nullptr) {
+        if (strcmp(token, ".") == 0 || strcmp(token, "..") == 0) {
+            char* next = joinPath(resolved, token);
+            size_t nextLen = strlen(next);
+            if (next[nextLen - 1] != '/') {
+                char* nextWithSlash = (char*)safeMalloc(nextLen + 2);
+                memcpy(nextWithSlash, next, nextLen);
+                nextWithSlash[nextLen] = '/';
+                nextWithSlash[nextLen + 1] = '\0';
+                free(next);
+                next = nextWithSlash;
+            }
+            free(resolved);
+            resolved = next;
+            token = strtok_r(nullptr, "/", &saveptr);
+            continue;
+        }
+
+        DIR* dir = opendir(resolved);
+        if (!dir) {
+            failed = true;
+            break;
+        }
+
+        struct dirent* entry;
+        bool found = false;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (strcasecmp(entry->d_name, token) == 0) {
+                char* next = joinPath(resolved, entry->d_name);
+                size_t nextLen = strlen(next);
+                if (next[nextLen - 1] != '/') {
+                    char* nextWithSlash = (char*)safeMalloc(nextLen + 2);
+                    memcpy(nextWithSlash, next, nextLen);
+                    nextWithSlash[nextLen] = '/';
+                    nextWithSlash[nextLen + 1] = '\0';
+                    free(next);
+                    next = nextWithSlash;
+                }
+                free(resolved);
+                resolved = next;
+                found = true;
+                break;
+            }
+        }
+        closedir(dir);
+
+        if (!found) {
+            failed = true;
+            break;
+        }
+
+        token = strtok_r(nullptr, "/", &saveptr);
+    }
+
+    free(relCopy);
+    if (failed) {
+        free(resolved);
+        return full; // fallback to the naive path
+    }
+    
+    // Strip trailing slash if it wasn't in the original path
+    size_t resLen = strlen(resolved);
+    size_t normLen = strlen(normalizedPath);
+    if (resLen > 0 && resolved[resLen - 1] == '/' && normLen > 0 && normalizedPath[normLen - 1] != '/') {
+        resolved[resLen - 1] = '\0';
+    }
+
+    free(full);
+    return resolved;
+}
+#endif
+
 // Returns a heap-allocated full path for reads. Absolute inputs pass through as-is.
 // For relative inputs, savePath wins if the file exists there, else bundlePath.
 static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
@@ -73,13 +160,13 @@ static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
     if (strncmp(normalized, ofs->savePath, strlen(ofs->savePath)) == 0) return normalized;
     if (strncmp(normalized, ofs->bundlePath, strlen(ofs->bundlePath)) == 0) return normalized;
 
-    char* saveFull = joinPath(ofs->savePath, normalized);
+    char* saveFull = joinPathCaseInsensitive(ofs->savePath, normalized);
     if (pathExists(saveFull)) {
         free(normalized);
         return saveFull;
     }
     free(saveFull);
-    char* bundleFull = joinPath(ofs->bundlePath, normalized);
+    char* bundleFull = joinPathCaseInsensitive(ofs->bundlePath, normalized);
     free(normalized);
     return bundleFull;
 }

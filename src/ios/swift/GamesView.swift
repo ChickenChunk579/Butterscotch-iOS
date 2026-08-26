@@ -435,6 +435,13 @@ struct GamesView: View {
             )
             ? Float(16.0 / 9.0)
             : 0.0
+        
+        settings.renderer = 
+            defaults.bool(
+                forKey: "ios.metal"
+            )
+            ? METAL
+            : MODERN_GL
 
         store.selectedGameID =
             game.id

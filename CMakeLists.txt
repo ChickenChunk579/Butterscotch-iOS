@@ -29,19 +29,14 @@ endif()
 
 set(ENABLE_LEGACY_GL OFF CACHE BOOL "Enable the legacy OpenGL renderer")
 set(ENABLE_MODERN_GL ON CACHE BOOL "Enable the modern OpenGL renderer")
-set(ENABLE_METAL OFF CACHE BOOL "Enable the Metal renderer")
+set(ENABLE_METAL ON CACHE BOOL "Enable the Metal renderer")
 
 if(ENABLE_LEGACY_GL)
     message(FATAL_ERROR "The legacy OpenGL renderer is not supported on iOS.")
 endif()
 
-if(ENABLE_METAL)
-    if(ENABLE_MODERN_GL)
-        message(STATUS "Metal renderer selected; disabling the modern OpenGL renderer.")
-        set(ENABLE_MODERN_GL OFF CACHE BOOL "Enable the modern OpenGL renderer" FORCE)
-    endif()
-elseif(NOT ENABLE_MODERN_GL)
-    message(FATAL_ERROR "Enable one of ENABLE_MODERN_GL or ENABLE_METAL.")
+if(NOT ENABLE_MODERN_GL AND NOT ENABLE_METAL)
+    message(FATAL_ERROR "Enable at least one of ENABLE_MODERN_GL or ENABLE_METAL.")
 endif()
 
 # iOS frameworks
@@ -175,9 +170,12 @@ if(ENABLE_MODERN_GL)
         src/gl/*.c
     )
     list(APPEND SOURCES ${GL_SOURCES})
-elseif(ENABLE_METAL)
-    file(GLOB METAL_IMAGE_SOURCES src/image/*.c)
-    list(APPEND SOURCES ${METAL_IMAGE_SOURCES})
+endif()
+if(ENABLE_METAL)
+    if(NOT ENABLE_MODERN_GL)
+        file(GLOB METAL_IMAGE_SOURCES src/image/*.c)
+        list(APPEND SOURCES ${METAL_IMAGE_SOURCES})
+    endif()
     list(APPEND SOURCES src/metal/metal_renderer.m)
 endif()
 

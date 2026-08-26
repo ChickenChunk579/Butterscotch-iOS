@@ -91,6 +91,7 @@ typedef struct {
     int32_t* surfaceWidth;
     int32_t* surfaceHeight;
     uint32_t surfaceCount;
+    int32_t videoSurfaceId;
 
     // Blending mode + factors
     int32_t currentBlendMode;
@@ -112,5 +113,6 @@ typedef struct {
 
 bool GLRenderer_ensureTextureLoaded(GLRenderer* gl, uint32_t pageId);
 Renderer* GLRenderer_create(void);
+int32_t GLRenderer_videoUploadFrame(Renderer* renderer, int32_t width, int32_t height, const uint8_t* rgba);
 
 #endif /* _BS_GL_RENDERER_H_ */

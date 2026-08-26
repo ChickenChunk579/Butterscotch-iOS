@@ -14,7 +14,8 @@ void IOSLauncherStartGameFromSwift(
     BOOL touchControls,
     BOOL showFPS,
     double speedMultiplier,
-    float widescreenAspect
+    float widescreenAspect,
+    int rendererId
 )
 {
     IOSLaunchSettings settings = {
@@ -24,7 +25,8 @@ void IOSLauncherStartGameFromSwift(
         .touchControls = touchControls,
         .showFPS = showFPS,
         .speedMultiplier = speedMultiplier,
-        .widescreenAspect = widescreenAspect
+        .widescreenAspect = widescreenAspect,
+        .renderer = rendererId
     };
 
     IOSLauncher_startGame(

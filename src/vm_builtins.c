@@ -17362,6 +17362,7 @@ static RValue builtin_sprite_get_info(VMContext* ctx, RValue* args, int32_t argC
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/time.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -17407,6 +17408,15 @@ typedef struct {
     Runner* runner;
     bool startEventSent;
     bool endEventSent;
+    volatile bool demuxEnded;
+    Mutex frameMutex;
+    uint8_t* latestPixels;
+    int32_t latestWidth;
+    int32_t latestHeight;
+    struct SwsContext* swsCtx;
+    bool frameMutexInitialized;
+    bool decodedFrameLogged;
+    bool videoDrawLogged;
 } VideoPlayerState;
 
 static VideoPlayerState g_VideoPlayer = {
@@ -17501,10 +17511,10 @@ static bool queue_push(PacketQueue* q, AVPacket* pkt) {
 
 static AVPacket* queue_pop(PacketQueue* q) {
     mutex_lock(&q->mutex);
-    while (q->count == 0 && !g_VideoPlayer.stopThreads) {
+    while (q->count == 0 && !g_VideoPlayer.stopThreads && !g_VideoPlayer.demuxEnded) {
         cond_wait(&q->cond, &q->mutex);
     }
-    if (g_VideoPlayer.stopThreads || q->count == 0) {
+    if (g_VideoPlayer.stopThreads || (q->count == 0 && g_VideoPlayer.demuxEnded)) {
         mutex_unlock(&q->mutex);
         return NULL;
     }
@@ -17552,20 +17562,9 @@ static THREAD_RETURN demux_loop(void* arg) {
             }
             av_packet_unref(packet);
         } else {
-            g_VideoPlayer.status = VIDEO_STATUS_CLOSED;
-
-            if (!g_VideoPlayer.endEventSent) {
-                g_VideoPlayer.endEventSent = true;
-
-                Runner_queueVideoEvent(
-                    g_VideoPlayer.runner,
-                    "video_end"
-                );
-
-                logInfo("video ended\n");
-            }
-
-            sleep_ms(10);
+            g_VideoPlayer.demuxEnded = true;
+            cond_signal(&g_VideoPlayer.pktQueue.cond);
+            break;
         }
     }
     av_packet_free(&packet);
@@ -17581,7 +17580,16 @@ static THREAD_RETURN decode_loop(void* arg) {
         }
 
         AVPacket* pkt = queue_pop(&g_VideoPlayer.pktQueue);
-        if (!pkt) continue;
+        if (!pkt) {
+            if (g_VideoPlayer.stopThreads) break;
+            g_VideoPlayer.status = VIDEO_STATUS_CLOSED;
+            if (!g_VideoPlayer.endEventSent) {
+                g_VideoPlayer.endEventSent = true;
+                Runner_queueVideoEvent(g_VideoPlayer.runner, "video_end");
+                logInfo("video ended\n");
+            }
+            break;
+        }
 
         if (avcodec_send_packet(g_VideoPlayer.codecCtx, pkt) >= 0) {
             while (avcodec_receive_frame(g_VideoPlayer.codecCtx, frame) >= 0) {
@@ -17596,6 +17604,33 @@ static THREAD_RETURN decode_loop(void* arg) {
 #else
                     usleep(frameTimeUs - nowUs);
 #endif
+                }
+
+                int32_t width = g_VideoPlayer.codecCtx->width;
+                int32_t height = g_VideoPlayer.codecCtx->height;
+                uint8_t* pixels = (uint8_t*)safeMalloc((size_t)width * (size_t)height * 4);
+                uint8_t* dstData[4] = {pixels, NULL, NULL, NULL};
+                int dstLinesize[4] = {width * 4, 0, 0, 0};
+                g_VideoPlayer.swsCtx = sws_getCachedContext(
+                    g_VideoPlayer.swsCtx, width, height, g_VideoPlayer.codecCtx->pix_fmt,
+                    width, height, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+                if (g_VideoPlayer.swsCtx == NULL || sws_scale(g_VideoPlayer.swsCtx,
+                        (const uint8_t* const*)frame->data, frame->linesize, 0, height,
+                        dstData, dstLinesize) <= 0) {
+                    free(pixels);
+                    pixels = NULL;
+                }
+                if (pixels != NULL) {
+                    mutex_lock(&g_VideoPlayer.frameMutex);
+                    free(g_VideoPlayer.latestPixels);
+                    g_VideoPlayer.latestPixels = pixels;
+                    g_VideoPlayer.latestWidth = width;
+                    g_VideoPlayer.latestHeight = height;
+                    mutex_unlock(&g_VideoPlayer.frameMutex);
+                    if (!g_VideoPlayer.decodedFrameLogged) {
+                        logDebug("Video: first RGBA frame decoded (%dx%d)\n", width, height);
+                        g_VideoPlayer.decodedFrameLogged = true;
+                    }
                 }
 
                 // Decode completed successfully. frame pixel data sits here.
@@ -17651,6 +17686,15 @@ static void internal_video_close() {
 
     if (g_VideoPlayer.codecCtx) avcodec_free_context(&g_VideoPlayer.codecCtx);
     if (g_VideoPlayer.formatCtx) avformat_close_input(&g_VideoPlayer.formatCtx);
+    if (g_VideoPlayer.swsCtx) sws_freeContext(g_VideoPlayer.swsCtx);
+    g_VideoPlayer.swsCtx = NULL;
+
+    mutex_lock(&g_VideoPlayer.frameMutex);
+    free(g_VideoPlayer.latestPixels);
+    g_VideoPlayer.latestPixels = NULL;
+    g_VideoPlayer.latestWidth = 0;
+    g_VideoPlayer.latestHeight = 0;
+    mutex_unlock(&g_VideoPlayer.frameMutex);
 
     g_VideoPlayer.status = VIDEO_STATUS_CLOSED;
     g_VideoPlayer.videoStreamIdx = -1;
@@ -17664,19 +17708,23 @@ static RValue builtin_video_open(VMContext* ctx, RValue* args, int32_t argCount)
     
     g_VideoPlayer.runner = ctx->runner;
     
-    const char* filename = RValue_toString(args[0]);
-    char buf[PATH_MAX];
-    snprintf(buf, PATH_MAX, "%s/%s", gamePath, filename);
+    char* filename = RValue_toString(args[0]);
+    FileSystem* fs = ctx->runner->fileSystem;
+    char* resolvedPath = fs->vtable->resolvePath(fs, filename);
+    free(filename);
 
     if (g_VideoPlayer.status != VIDEO_STATUS_CLOSED) {
         internal_video_close();
     }
 
     g_VideoPlayer.formatCtx = avformat_alloc_context();
-    if (avformat_open_input(&g_VideoPlayer.formatCtx, buf, NULL, NULL) < 0) {
-        logError("avformat_open_input(%s) failed\n", buf);
+    if (avformat_open_input(&g_VideoPlayer.formatCtx, resolvedPath, NULL, NULL) < 0) {
+        logError("avformat_open_input(%s) failed\n", resolvedPath);
+        free(resolvedPath);
         return RValue_makeUndefined();
     }
+    
+    free(resolvedPath);
 
     if (avformat_find_stream_info(g_VideoPlayer.formatCtx, NULL) < 0) {
         internal_video_close();
@@ -17706,7 +17754,12 @@ static RValue builtin_video_open(VMContext* ctx, RValue* args, int32_t argCount)
     }
 
     queue_init(&g_VideoPlayer.pktQueue);
+    if (!g_VideoPlayer.frameMutexInitialized) {
+        mutex_init(&g_VideoPlayer.frameMutex);
+        g_VideoPlayer.frameMutexInitialized = true;
+    }
     g_VideoPlayer.stopThreads = false;
+    g_VideoPlayer.demuxEnded = false;
     g_VideoPlayer.startTimeUs = av_gettime_relative();
     g_VideoPlayer.status = VIDEO_STATUS_PLAYING;
 
@@ -17724,7 +17777,12 @@ static RValue builtin_video_open(VMContext* ctx, RValue* args, int32_t argCount)
 }
 
 static RValue builtin_video_close(VMContext* ctx, RValue* args, int32_t argCount) {
+    (void)ctx;
+    (void)args;
+    (void)argCount;
     logInfo("video_close called");
+    if (g_VideoPlayer.formatCtx != NULL || g_VideoPlayer.codecCtx != NULL)
+        internal_video_close();
     return RValue_makeUndefined();
 }
 
@@ -17760,15 +17818,42 @@ static RValue builtin_video_seek_to(VMContext* ctx, RValue* args, int32_t argCou
 }
 
 static RValue builtin_video_draw(VMContext* ctx, RValue* args, int32_t argCount) {
-    // Kept stubbed: Returns standard GameMaker array layout [status, surface_id]
-    if (g_VideoPlayer.status == VIDEO_STATUS_CLOSED) {
+    (void)args;
+    (void)argCount;
+    static bool videoDrawCallLogged;
+    mutex_lock(&g_VideoPlayer.frameMutex);
+    bool hasFrame = g_VideoPlayer.latestPixels != NULL;
+    int32_t frameWidth = g_VideoPlayer.latestWidth;
+    int32_t frameHeight = g_VideoPlayer.latestHeight;
+    mutex_unlock(&g_VideoPlayer.frameMutex);
+    if (!videoDrawCallLogged) {
+        logDebug("Video: video_draw called status=%d frame=%s (%dx%d) uploadHook=%s\n",
+                 g_VideoPlayer.status, hasFrame ? "yes" : "no", frameWidth, frameHeight,
+                 ctx->runner->renderer != NULL && ctx->runner->renderer->vtable->videoUploadFrame != NULL ? "yes" : "no");
+        videoDrawCallLogged = true;
+    }
+    if (g_VideoPlayer.status == VIDEO_STATUS_CLOSED && !hasFrame) {
         GMLArray* arr = GMLArray_create(ctx->dataWin->gen8.wadVersion, 0);
         GMLArray_add(arr, RValue_makeReal(-2.0));
         return RValue_makeArray(arr);
     }
     GMLArray* arr = GMLArray_create(ctx->dataWin->gen8.wadVersion, 0);
-    GMLArray_add(arr, RValue_makeReal(0.0));  // Status 0: OK / Frame Ready
-    GMLArray_add(arr, RValue_makeReal(-1.0)); // Surface index (-1 fallback stub)
+    int32_t surfaceId = -1;
+    mutex_lock(&g_VideoPlayer.frameMutex);
+    if (g_VideoPlayer.latestPixels != NULL && ctx->runner->renderer != NULL &&
+        ctx->runner->renderer->vtable->videoUploadFrame != NULL) {
+        surfaceId = ctx->runner->renderer->vtable->videoUploadFrame(
+            ctx->runner->renderer, g_VideoPlayer.latestWidth, g_VideoPlayer.latestHeight,
+            g_VideoPlayer.latestPixels);
+        if (!g_VideoPlayer.videoDrawLogged) {
+            logDebug("Video: video_draw uploaded frame (%dx%d) to surface %d\n",
+                     g_VideoPlayer.latestWidth, g_VideoPlayer.latestHeight, surfaceId);
+            g_VideoPlayer.videoDrawLogged = true;
+        }
+    }
+    mutex_unlock(&g_VideoPlayer.frameMutex);
+    GMLArray_add(arr, RValue_makeReal(surfaceId != -1 ? 0.0 : -1.0));
+    GMLArray_add(arr, RValue_makeReal((double)surfaceId));
     return RValue_makeArray(arr);
 }
 

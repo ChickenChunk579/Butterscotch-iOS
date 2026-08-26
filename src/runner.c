@@ -4097,6 +4097,8 @@ void Runner_step(Runner* runner) {
 
             DsMapEntry** mapPtr = &runner->dsMapPool[mapId];
 
+            logDebug("Runner: dispatching async video event: %s\n", event->type != nullptr ? event->type : "unknown");
+
             shput(
                 *mapPtr,
                 safeStrdup("type"),
@@ -4107,7 +4109,7 @@ void Runner_step(Runner* runner) {
             event->type = nullptr;
 
             runner->asyncLoadMapId = mapId;
-            Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ASYNC_SYSTEM);
+            Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ASYNC_SOCIAL);
 
             // Clean up ds_map.
             mapPtr = &runner->dsMapPool[mapId];
