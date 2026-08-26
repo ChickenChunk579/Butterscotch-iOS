@@ -135,7 +135,6 @@ file(WRITE "${BUILD_INFO_SWIFT}"
 option(ENABLE_WAD14 "Enable support for WAD Version 14 and below" ON)
 option(ENABLE_WAD16 "Enable support for WAD Version 15/16" ON)
 option(ENABLE_WAD17 "Enable support for WAD Version 17" ON)
-
 if(NOT ENABLE_WAD14 AND NOT ENABLE_WAD16 AND NOT ENABLE_WAD17)
     message(FATAL_ERROR "At least one WAD version must be enabled.")
 endif()

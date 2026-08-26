@@ -407,7 +407,7 @@ void saveInputRecording() {
     }
 }
 
-#if !defined(_WIN32) && !defined(PLATFORM_VITA)
+#if !defined(_WIN32) && !defined(PLATFORM_VITA) && !defined(__SWITCH__)
 #define USE_CRASH_SIGNAL_HANDLER
 typedef struct { int key; struct sigaction value; } PreviousSignalActionEntry;
 static PreviousSignalActionEntry* previousSignalActions = nullptr;
@@ -469,7 +469,7 @@ int loop(CommandLineArgs args, const char *argv0) {
         arrput(currentGameArgs, args.gameArgs[i]);
     }
     // The first argument will ALWAYS be the argv[0]
-    arrins(currentGameArgs, 0, safeStrdup(argv0));
+    arrins(currentGameArgs, 0, safeStrdup(argv0 != nullptr ? argv0 : ""));
 
     bool platformInitialized = false;
     int32_t inputFrameCount = 0;
