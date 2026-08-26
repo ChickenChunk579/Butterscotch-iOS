@@ -176,7 +176,13 @@ if(ENABLE_METAL)
         file(GLOB METAL_IMAGE_SOURCES src/image/*.c)
         list(APPEND SOURCES ${METAL_IMAGE_SOURCES})
     endif()
-    list(APPEND SOURCES src/metal/metal_renderer.m)
+    list(APPEND SOURCES
+        src/metal/metal_renderer.m
+        src/metal/metal_draw.m
+        src/metal/metal_surfaces.m
+        src/metal/metal_state.m
+        src/metal/metal_shaders.m
+    )
 endif()
 
 # Dependencies

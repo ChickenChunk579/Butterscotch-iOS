@@ -1,73 +1,289 @@
-#import <Metal/Metal.h>
-#import <QuartzCore/CAMetalLayer.h>
-#include <simd/simd.h>
+#import "metal_internal.h"
 
-#include "metal_renderer.h"
-#include "log.h"
-#include "platformdefs.h"
-#include "utils.h"
-#include "image_decoder.h"
-#include "text_utils.h"
+MetalRenderer* gActiveMetalRenderer;
 
-typedef struct {
-    vector_float2 position;
-    vector_float2 uv;
-    vector_float4 color;
-} MetalVertex;
-
-typedef struct {
-    Renderer base;
-    id<MTLDevice> device;
-    id<MTLCommandQueue> commandQueue;
-    id<CAMetalDrawable> drawable;
-    id<MTLCommandBuffer> commandBuffer;
-    id<MTLCommandBuffer> presentedCommandBuffer;
-    id<MTLRenderCommandEncoder> encoder;
-    id<MTLRenderPipelineState> pipeline;
-    id<MTLTexture> whiteTexture;
-    id<MTLTexture> videoTexture;
-    int32_t videoWidth;
-    int32_t videoHeight;
-    id<MTLTexture> stagedTextures[MAX_TEXTURE_STAGES];
-    __strong id<MTLTexture>* textures;
-    int32_t* textureWidths;
-    int32_t* textureHeights;
-    bool* textureLoaded;
-    uint32_t textureCount;
-    int32_t windowW;
-    int32_t windowH;
-    bool blendEnabled;
-    bool colorWriteR;
-    bool colorWriteG;
-    bool colorWriteB;
-    bool colorWriteA;
-} MetalRenderer;
-
-static MetalRenderer* activeMetalRenderer;
-static bool metalTextDiagnosticLogged;
-static bool metalGlyphDiagnosticLogged;
-static bool metalVisibleTextDiagnosticLogged;
-
-static const char* metalShaderSource =
+static const char* kMetalDefaultShaderSource =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "struct Vertex { float2 position; float2 uv; float4 color; };\n"
-    "struct VSOut { float4 position [[position]]; float2 uv; float4 color; };\n"
-    "vertex VSOut bs_vertex(const device Vertex* vertices [[buffer(0)]], uint id [[vertex_id]]) {\n"
-    "    VSOut out; out.position = float4(vertices[id].position, 0.0, 1.0);\n"
-    "    out.uv = vertices[id].uv; out.color = vertices[id].color; return out;\n"
+    "struct Uniforms {\n"
+    "    float4x4 wvp;\n"
+    "    float4 fogColor;\n"
+    "    float alphaTestRef;\n"
+    "    int alphaTestEnabled;\n"
+    "    int _pad0;\n"
+    "    int _pad1;\n"
+    "};\n"
+    "struct VSOut {\n"
+    "    float4 position [[position]];\n"
+    "    float2 uv;\n"
+    "    float4 color;\n"
+    "};\n"
+    "vertex VSOut bs_vertex(const device Vertex* vertices [[buffer(0)]],\n"
+    "                       constant Uniforms& uniforms [[buffer(1)]],\n"
+    "                       uint id [[vertex_id]]) {\n"
+    "    VSOut out;\n"
+    "    float4 pos = float4(vertices[id].position, 0.0, 1.0);\n"
+    "    out.position = uniforms.wvp * pos;\n"
+    "    out.uv = vertices[id].uv;\n"
+    "    out.color = vertices[id].color;\n"
+    "    return out;\n"
     "}\n"
-    "fragment float4 bs_fragment(VSOut in [[stage_in]], texture2d<float> texture [[texture(0)]]) {\n"
-    "    constexpr sampler sampler2d(filter::nearest, address::clamp_to_edge);\n"
-    "    return texture.sample(sampler2d, in.uv) * in.color;\n"
+    "fragment float4 bs_fragment(VSOut in [[stage_in]],\n"
+    "                            constant Uniforms& uniforms [[buffer(1)]],\n"
+    "                            texture2d<float> texture [[texture(0)]],\n"
+    "                            sampler samp [[sampler(0)]]) {\n"
+    "    float4 c = texture.sample(samp, in.uv) * in.color;\n"
+    "    if (uniforms.alphaTestEnabled != 0 && uniforms.alphaTestRef >= c.a) discard_fragment();\n"
+    "    c.rgb = mix(c.rgb, uniforms.fogColor.rgb, uniforms.fogColor.a);\n"
+    "    return c;\n"
     "}\n";
 
-static bool metalEnsureTextureLoaded(MetalRenderer* metal, uint32_t pageId) {
+MTLBlendFactor metalBlendFactorToMTL(int factor) {
+    switch (factor) {
+        case bm_zero: return MTLBlendFactorZero;
+        case bm_one: return MTLBlendFactorOne;
+        case bm_src_color: return MTLBlendFactorSourceColor;
+        case bm_inv_src_color: return MTLBlendFactorOneMinusSourceColor;
+        case bm_src_alpha: return MTLBlendFactorSourceAlpha;
+        case bm_inv_src_alpha: return MTLBlendFactorOneMinusSourceAlpha;
+        case bm_dest_alpha: return MTLBlendFactorDestinationAlpha;
+        case bm_inv_dest_alpha: return MTLBlendFactorOneMinusDestinationAlpha;
+        case bm_dest_color: return MTLBlendFactorDestinationColor;
+        case bm_inv_dest_color: return MTLBlendFactorOneMinusDestinationColor;
+        case bm_src_alpha_sat: return MTLBlendFactorSourceAlphaSaturated;
+        default: return MTLBlendFactorOne;
+    }
+}
+
+MTLBlendOperation metalBlendModeToEquation(int mode) {
+    switch (mode) {
+        case bm_reverse_subtract: return MTLBlendOperationReverseSubtract;
+        case bm_min: return MTLBlendOperationMin;
+        case bm_max: return MTLBlendOperationMax;
+        default: return MTLBlendOperationAdd;
+    }
+}
+
+void metalFillBlendFactors(MetalRenderer* metal, MTLRenderPipelineColorAttachmentDescriptor* attachment) {
+    attachment.blendingEnabled = metal->blendEnabled;
+    attachment.rgbBlendOperation = metalBlendModeToEquation(metal->currentBlendMode);
+    attachment.alphaBlendOperation = metalBlendModeToEquation(metal->currentBlendMode);
+    if (metal->currentBlendMode == bm_subtract) {
+        // GL uses ZERO / ONE_MINUS_SRC_COLOR with ADD for subtract.
+        attachment.sourceRGBBlendFactor = MTLBlendFactorZero;
+        attachment.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceColor;
+        attachment.sourceAlphaBlendFactor = MTLBlendFactorZero;
+        attachment.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceColor;
+    } else {
+        attachment.sourceRGBBlendFactor = metalBlendFactorToMTL(metal->currentSFactor);
+        attachment.destinationRGBBlendFactor = metalBlendFactorToMTL(metal->currentDFactor);
+        attachment.sourceAlphaBlendFactor = metalBlendFactorToMTL(metal->currentSFactorAlpha);
+        attachment.destinationAlphaBlendFactor = metalBlendFactorToMTL(metal->currentDFactorAlpha);
+    }
+    MTLColorWriteMask mask = MTLColorWriteMaskNone;
+    if (metal->colorWriteR) mask |= MTLColorWriteMaskRed;
+    if (metal->colorWriteG) mask |= MTLColorWriteMaskGreen;
+    if (metal->colorWriteB) mask |= MTLColorWriteMaskBlue;
+    if (metal->colorWriteA) mask |= MTLColorWriteMaskAlpha;
+    attachment.writeMask = mask;
+}
+
+static bool metalPipelineKeysEqual(const MetalPipelineKey* a, const MetalPipelineKey* b) {
+    return a->blendMode == b->blendMode &&
+           a->sfactor == b->sfactor &&
+           a->dfactor == b->dfactor &&
+           a->sfactorAlpha == b->sfactorAlpha &&
+           a->dfactorAlpha == b->dfactorAlpha &&
+           a->blendEnabled == b->blendEnabled &&
+           a->colorWriteMask == b->colorWriteMask &&
+           a->shaderIndex == b->shaderIndex &&
+           a->pixelFormat == b->pixelFormat;
+}
+
+static MTLPixelFormat metalCurrentTargetPixelFormat(MetalRenderer* metal) {
+    id<MTLTexture> target = metal->encoderTarget != nil ? metal->encoderTarget : metal->currentTarget;
+    if (target != nil) return target.pixelFormat;
+    return MTLPixelFormatRGBA8Unorm;
+}
+
+static MetalPipelineKey metalMakePipelineKey(MetalRenderer* metal) {
+    MetalPipelineKey key = {0};
+    key.blendMode = metal->currentBlendMode;
+    key.sfactor = metal->currentSFactor;
+    key.dfactor = metal->currentDFactor;
+    key.sfactorAlpha = metal->currentSFactorAlpha;
+    key.dfactorAlpha = metal->currentDFactorAlpha;
+    key.blendEnabled = metal->blendEnabled;
+    key.colorWriteMask = (uint8_t)((metal->colorWriteR ? 1 : 0) |
+                                   (metal->colorWriteG ? 2 : 0) |
+                                   (metal->colorWriteB ? 4 : 0) |
+                                   (metal->colorWriteA ? 8 : 0));
+    key.shaderIndex = metal->base.currentShader;
+    key.pixelFormat = metalCurrentTargetPixelFormat(metal);
+    return key;
+}
+
+id<MTLRenderPipelineState> metalGetPipeline(MetalRenderer* metal) {
+    MetalPipelineKey key = metalMakePipelineKey(metal);
+    for (uint32_t i = 0; i < metal->pipelineCacheCount; i++) {
+        if (metalPipelineKeysEqual(&metal->pipelineCache[i].key, &key))
+            return metal->pipelineCache[i].pipeline;
+    }
+
+    id<MTLFunction> vert = metal->defaultVertexFunction;
+    id<MTLFunction> frag = metal->defaultFragmentFunction;
+    if (key.shaderIndex >= 0 && (uint32_t)key.shaderIndex < metal->gmlShaderCount) {
+        MetalGMLShader* shader = &metal->gmlShaders[key.shaderIndex];
+        if (shader->compiled && shader->vertexFunction != nil && shader->fragmentFunction != nil) {
+            vert = shader->vertexFunction;
+            frag = shader->fragmentFunction;
+        }
+    }
+
+    MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+    desc.vertexFunction = vert;
+    desc.fragmentFunction = frag;
+    desc.colorAttachments[0].pixelFormat = key.pixelFormat;
+    metalFillBlendFactors(metal, desc.colorAttachments[0]);
+
+    NSError* error = nil;
+    id<MTLRenderPipelineState> pipeline = [metal->device newRenderPipelineStateWithDescriptor:desc error:&error];
+    if (pipeline == nil) {
+        logError("Metal: pipeline creation failed: %s\n", error.localizedDescription.UTF8String);
+        return metal->defaultPipeline;
+    }
+
+    if (metal->pipelineCacheCount < METAL_MAX_PIPELINE_CACHE) {
+        metal->pipelineCache[metal->pipelineCacheCount].key = key;
+        metal->pipelineCache[metal->pipelineCacheCount].pipeline = pipeline;
+        metal->pipelineCacheCount++;
+    }
+    return pipeline;
+}
+
+void metalEndEncoder(MetalRenderer* metal) {
+    if (metal->encoder != nil) {
+        [metal->encoder endEncoding];
+        metal->encoder = nil;
+    }
+    metal->encoderTarget = nil;
+}
+
+void metalEnsureEncoder(MetalRenderer* metal, bool clear, MTLClearColor clearColor) {
+    if (metal->commandBuffer == nil || metal->currentTarget == nil) return;
+    // Must recreate whenever the color attachment changes; Metal validates scissor
+    // against the active render pass, not our bookkeeping pointer.
+    if (metal->encoder != nil && !clear && metal->encoderTarget == metal->currentTarget) return;
+
+    metalEndEncoder(metal);
+
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = metal->currentTarget;
+    pass.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    if (clear) pass.colorAttachments[0].clearColor = clearColor;
+    metal->encoder = [metal->commandBuffer renderCommandEncoderWithDescriptor:pass];
+    metal->encoderTarget = metal->currentTarget;
+}
+
+void metalBindSurfaceTarget(MetalRenderer* metal, int32_t surfaceId, bool clear, MTLClearColor clearColor) {
+    if (surfaceId < 0 || (uint32_t)surfaceId >= metal->surfaceCount || !metal->surfaceAlive[surfaceId]) {
+        return;
+    }
+    metal->currentSurfaceId = surfaceId;
+    metal->currentTarget = metal->surfaceTextures[surfaceId];
+    metalEnsureEncoder(metal, clear, clearColor);
+    if (metal->encoder != nil) {
+        metalApplyViewportScissor(metal, 0, 0,
+                                  metal->surfaceWidth[surfaceId], metal->surfaceHeight[surfaceId], false);
+    }
+}
+
+void metalApplyViewportScissor(MetalRenderer* metal, int32_t x, int32_t y, int32_t w, int32_t h, bool enableScissor) {
+    if (metal->encoder == nil) return;
+    // Clamp against the encoder's actual color attachment — never currentTarget alone,
+    // which can briefly disagree while switching surfaces.
+    id<MTLTexture> pass = metal->encoderTarget != nil ? metal->encoderTarget : metal->currentTarget;
+    int32_t targetW = pass != nil ? (int32_t)pass.width : metal->gameW;
+    int32_t targetH = pass != nil ? (int32_t)pass.height : metal->gameH;
+    if (targetW <= 0) targetW = 1;
+    if (targetH <= 0) targetH = 1;
+
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= targetW) { x = 0; w = 0; }
+    if (y >= targetH) { y = 0; h = 0; }
+    if (x + w > targetW) w = targetW - x;
+    if (y + h > targetH) h = targetH - y;
+    if (w < 0) w = 0;
+    if (h < 0) h = 0;
+    // Metal rejects zero-size scissor rects in some validation paths; use 1x1 at origin.
+    if (w == 0 || h == 0) { x = 0; y = 0; w = 1; h = 1; }
+
+    [metal->encoder setViewport:(MTLViewport){(double)x, (double)y, (double)w, (double)h, 0.0, 1.0}];
+    if (enableScissor) {
+        [metal->encoder setScissorRect:(MTLScissorRect){(NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h}];
+    } else {
+        [metal->encoder setScissorRect:(MTLScissorRect){0, 0, (NSUInteger)targetW, (NSUInteger)targetH}];
+    }
+}
+
+void metalUploadDefaultUniforms(MetalRenderer* metal) {
+    // Match GL: flip clip Y when uploading world->clip (GameMaker Y-down vs Metal NDC).
+    Matrix4f wvp = metal->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
+    //Matrix4f_flipClipY(&wvp);
+    memcpy(&metal->defaultUniforms.wvp, wvp.m, sizeof(matrix_float4x4));
+    metal->defaultUniforms.fogColor = (vector_float4){
+        BGR_R(metal->fogColor) / 255.0f,
+        BGR_G(metal->fogColor) / 255.0f,
+        BGR_B(metal->fogColor) / 255.0f,
+        metal->fogEnable ? 1.0f : 0.0f
+    };
+    metal->defaultUniforms.alphaTestRef = metal->alphaTestRef;
+    metal->defaultUniforms.alphaTestEnabled = metal->alphaTestEnable ? 1 : 0;
+}
+
+void metalBindDrawState(MetalRenderer* metal) {
+    if (metal->encoder == nil) return;
+    id<MTLRenderPipelineState> pipeline = metalGetPipeline(metal);
+    [metal->encoder setRenderPipelineState:pipeline];
+
+    if (metal->base.currentShader >= 0 && (uint32_t)metal->base.currentShader < metal->gmlShaderCount &&
+        metal->gmlShaders[metal->base.currentShader].compiled) {
+        metalRefreshShaderBuiltins(metal);
+        MetalGMLShader* shader = &metal->gmlShaders[metal->base.currentShader];
+        if (shader->uniformFloatCount > 0 && shader->uniformData != nullptr) {
+            [metal->encoder setVertexBytes:shader->uniformData
+                                    length:shader->uniformFloatCount * sizeof(float)
+                                   atIndex:1];
+            [metal->encoder setFragmentBytes:shader->uniformData
+                                      length:shader->uniformFloatCount * sizeof(float)
+                                     atIndex:1];
+        }
+        for (uint32_t i = 0; i < shader->samplerCount && i < METAL_MAX_SHADER_SAMPLERS; i++) {
+            id<MTLTexture> tex = metal->stagedTextures[i];
+            if (tex == nil) tex = metal->whiteTexture;
+            [metal->encoder setFragmentTexture:tex atIndex:i];
+            [metal->encoder setFragmentSamplerState:metal->nearestSampler atIndex:i];
+        }
+    } else {
+        metalUploadDefaultUniforms(metal);
+        [metal->encoder setVertexBytes:&metal->defaultUniforms length:sizeof(MetalDefaultUniforms) atIndex:1];
+        [metal->encoder setFragmentBytes:&metal->defaultUniforms length:sizeof(MetalDefaultUniforms) atIndex:1];
+        [metal->encoder setFragmentSamplerState:metal->nearestSampler atIndex:0];
+    }
+}
+
+bool metalEnsureTextureLoaded(MetalRenderer* metal, uint32_t pageId) {
     if (pageId >= metal->textureCount) return false;
     if (metal->textureLoaded[pageId]) return metal->textures[pageId] != nil;
 
     metal->textureLoaded[pageId] = true;
     DataWin* dataWin = metal->base.dataWin;
+    if (pageId >= dataWin->txtr.count) return false;
     Texture* texture = &dataWin->txtr.textures[pageId];
     DataWin_loadTxtrIfNeeded(dataWin, pageId);
 
@@ -92,9 +308,9 @@ static bool metalEnsureTextureLoaded(MetalRenderer* metal, uint32_t pageId) {
     descriptor.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> gpuTexture = [metal->device newTextureWithDescriptor:descriptor];
     [gpuTexture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)width, (NSUInteger)height)
-                   mipmapLevel:0
-                     withBytes:pixels
-                   bytesPerRow:(NSUInteger)width * 4];
+                  mipmapLevel:0
+                    withBytes:pixels
+                  bytesPerRow:(NSUInteger)width * 4];
     free(pixels);
 
     metal->textures[pageId] = gpuTexture;
@@ -104,14 +320,82 @@ static bool metalEnsureTextureLoaded(MetalRenderer* metal, uint32_t pageId) {
     return true;
 }
 
+bool metalResolveTpag(MetalRenderer* metal, int32_t tpagIndex, TexturePageItem** outTpag, uint32_t* outPageId) {
+    DataWin* dataWin = metal->base.dataWin;
+    if (tpagIndex < 0 || (uint32_t)tpagIndex >= dataWin->tpag.count) return false;
+    TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+    if (tpag->texturePageId < 0 || (uint32_t)tpag->texturePageId >= metal->textureCount) return false;
+    *outTpag = tpag;
+    *outPageId = (uint32_t)tpag->texturePageId;
+    return true;
+}
+
+uint32_t metalFindOrAllocTexturePageSlot(MetalRenderer* metal) {
+    for (uint32_t i = metal->originalTexturePageCount; i < metal->textureCount; i++) {
+        if (metal->textures[i] == nil) return i;
+    }
+    uint32_t newPageId = metal->textureCount;
+    metal->textureCount++;
+    metal->textures = (__strong id<MTLTexture>*)safeRealloc(metal->textures, metal->textureCount * sizeof(id<MTLTexture>));
+    metal->textureWidths = (int32_t*)safeRealloc(metal->textureWidths, metal->textureCount * sizeof(int32_t));
+    metal->textureHeights = (int32_t*)safeRealloc(metal->textureHeights, metal->textureCount * sizeof(int32_t));
+    metal->textureLoaded = (bool*)safeRealloc(metal->textureLoaded, metal->textureCount * sizeof(bool));
+    metal->textures[newPageId] = nil;
+    metal->textureWidths[newPageId] = 0;
+    metal->textureHeights[newPageId] = 0;
+    metal->textureLoaded[newPageId] = false;
+    return newPageId;
+}
+
+uint32_t metalFindOrAllocTpagSlot(DataWin* dw, uint32_t originalTpagCount) {
+    for (uint32_t i = originalTpagCount; i < dw->tpag.count; i++) {
+        if (dw->tpag.items[i].texturePageId == -1) return i;
+    }
+    uint32_t newIndex = dw->tpag.count;
+    dw->tpag.count++;
+    dw->tpag.items = (TexturePageItem*)safeRealloc(dw->tpag.items, dw->tpag.count * sizeof(TexturePageItem));
+    memset(&dw->tpag.items[newIndex], 0, sizeof(TexturePageItem));
+    dw->tpag.items[newIndex].texturePageId = -1;
+    return newIndex;
+}
+
+uint32_t metalFindOrAllocateSurfaceSlot(MetalRenderer* metal) {
+    for (uint32_t i = 0; i < metal->surfaceCount; i++) {
+        if (!metal->surfaceAlive[i]) return i;
+    }
+    uint32_t newIndex = metal->surfaceCount;
+    metal->surfaceCount++;
+    metal->surfaceTextures = (__strong id<MTLTexture>*)safeRealloc(metal->surfaceTextures, metal->surfaceCount * sizeof(id<MTLTexture>));
+    metal->surfaceWidth = (int32_t*)safeRealloc(metal->surfaceWidth, metal->surfaceCount * sizeof(int32_t));
+    metal->surfaceHeight = (int32_t*)safeRealloc(metal->surfaceHeight, metal->surfaceCount * sizeof(int32_t));
+    metal->surfaceAlive = (bool*)safeRealloc(metal->surfaceAlive, metal->surfaceCount * sizeof(bool));
+    metal->surfaceTextures[newIndex] = nil;
+    metal->surfaceWidth[newIndex] = 0;
+    metal->surfaceHeight[newIndex] = 0;
+    metal->surfaceAlive[newIndex] = false;
+    return newIndex;
+}
+
+id<MTLTexture> metalCreateRenderTexture(MetalRenderer* metal, int32_t width, int32_t height) {
+    if (width <= 0 || height <= 0) return nil;
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                             width:(NSUInteger)width
+                                                                                            height:(NSUInteger)height
+                                                                                         mipmapped:NO];
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModeShared;
+    return [metal->device newTextureWithDescriptor:descriptor];
+}
+
 static void metalInit(Renderer* renderer, DataWin* dataWin) {
-    MetalRenderer* metal = (MetalRenderer*) renderer;
-    CAMetalLayer* layer = (__bridge CAMetalLayer*) platformGetMetalLayer();
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    CAMetalLayer* layer = (__bridge CAMetalLayer*)platformGetMetalLayer();
 
     renderer->dataWin = dataWin;
     Matrix4f world;
     Matrix4f_identity(&world);
     renderer->gmlMatrices[MATRIX_WORLD] = world;
+
     metal->device = MTLCreateSystemDefaultDevice();
     if (metal->device == nil || layer == nil) {
         logError("Metal: no default device or CAMetalLayer is available\n");
@@ -120,22 +404,26 @@ static void metalInit(Renderer* renderer, DataWin* dataWin) {
 
     layer.device = metal->device;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    layer.framebufferOnly = YES;
+    layer.framebufferOnly = NO; // need to sample/blit from drawable path via surfaces
     layer.magnificationFilter = kCAFilterNearest;
     layer.minificationFilter = kCAFilterNearest;
     metal->commandQueue = [metal->device newCommandQueue];
+
     NSError* error = nil;
-    id<MTLLibrary> library = [metal->device newLibraryWithSource:[NSString stringWithUTF8String:metalShaderSource]
-                                                           options:nil
-                                                             error:&error];
-    if (library == nil) {
-        logError("Metal: shader library creation failed: %s\n", error.localizedDescription.UTF8String);
+    metal->defaultLibrary = [metal->device newLibraryWithSource:[NSString stringWithUTF8String:kMetalDefaultShaderSource]
+                                                         options:nil
+                                                           error:&error];
+    if (metal->defaultLibrary == nil) {
+        logError("Metal: default shader library failed: %s\n", error.localizedDescription.UTF8String);
         return;
     }
+    metal->defaultVertexFunction = [metal->defaultLibrary newFunctionWithName:@"bs_vertex"];
+    metal->defaultFragmentFunction = [metal->defaultLibrary newFunctionWithName:@"bs_fragment"];
+
     MTLRenderPipelineDescriptor* pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    pipelineDescriptor.vertexFunction = [library newFunctionWithName:@"bs_vertex"];
-    pipelineDescriptor.fragmentFunction = [library newFunctionWithName:@"bs_fragment"];
-    pipelineDescriptor.colorAttachments[0].pixelFormat = layer.pixelFormat;
+    pipelineDescriptor.vertexFunction = metal->defaultVertexFunction;
+    pipelineDescriptor.fragmentFunction = metal->defaultFragmentFunction;
+    pipelineDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     pipelineDescriptor.colorAttachments[0].blendingEnabled = YES;
     pipelineDescriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     pipelineDescriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
@@ -143,35 +431,69 @@ static void metalInit(Renderer* renderer, DataWin* dataWin) {
     pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
     pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    metal->pipeline = [metal->device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
-    if (metal->pipeline == nil) {
-        logError("Metal: pipeline creation failed: %s\n", error.localizedDescription.UTF8String);
+    metal->defaultPipeline = [metal->device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+    if (metal->defaultPipeline == nil) {
+        logError("Metal: default pipeline failed: %s\n", error.localizedDescription.UTF8String);
         return;
     }
+
+    pipelineDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pipelineDescriptor.colorAttachments[0].blendingEnabled = NO;
+    metal->presentPipeline = [metal->device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+    if (metal->presentPipeline == nil) {
+        logError("Metal: present pipeline failed: %s\n", error.localizedDescription.UTF8String);
+        return;
+    }
+
     MTLTextureDescriptor* whiteDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                                   width:1 height:1 mipmapped:NO];
     metal->whiteTexture = [metal->device newTextureWithDescriptor:whiteDescriptor];
-    uint32_t whitePixel = 0xFFFFFFFF;
+    uint32_t whitePixel = 0xFFFFFFFFu;
     [metal->whiteTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0
-                              withBytes:&whitePixel bytesPerRow:sizeof(whitePixel)];
+                             withBytes:&whitePixel bytesPerRow:sizeof(whitePixel)];
+
+    MTLSamplerDescriptor* samplerDesc = [[MTLSamplerDescriptor alloc] init];
+    samplerDesc.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerDesc.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    metal->nearestSampler = [metal->device newSamplerStateWithDescriptor:samplerDesc];
+    samplerDesc.sAddressMode = MTLSamplerAddressModeRepeat;
+    samplerDesc.tAddressMode = MTLSamplerAddressModeRepeat;
+    metal->nearestRepeatSampler = [metal->device newSamplerStateWithDescriptor:samplerDesc];
+
     metal->textureCount = dataWin->txtr.count;
+    metal->originalTexturePageCount = dataWin->txtr.count;
+    metal->originalTpagCount = dataWin->tpag.count;
+    metal->originalSpriteCount = dataWin->sprt.count;
     metal->textures = (__strong id<MTLTexture>*)safeCalloc(metal->textureCount, sizeof(id<MTLTexture>));
     metal->textureWidths = (int32_t*)safeCalloc(metal->textureCount, sizeof(int32_t));
     metal->textureHeights = (int32_t*)safeCalloc(metal->textureCount, sizeof(int32_t));
     metal->textureLoaded = (bool*)safeCalloc(metal->textureCount, sizeof(bool));
-    metal->blendEnabled = true;
-    metal->colorWriteR = true;
-    metal->colorWriteG = true;
-    metal->colorWriteB = true;
-    metal->colorWriteA = true;
+    metal->stagedTextures = (__strong id<MTLTexture>*)safeCalloc(MAX_TEXTURE_STAGES, sizeof(id<MTLTexture>));
 
-    logInfo("Metal: initialized device %s\n", metal->device.name.UTF8String);
+    metal->blendEnabled = true;
+    metal->colorWriteR = metal->colorWriteG = metal->colorWriteB = metal->colorWriteA = true;
+    metal->alphaTestEnable = false;
+    metal->alphaTestRef = 0.0f;
+    metal->fogEnable = false;
+    metal->fogColor = 0;
+    metal->currentBlendMode = bm_normal;
+    metal->currentSFactor = bm_src_alpha;
+    metal->currentDFactor = bm_inv_src_alpha;
+    metal->currentSFactorAlpha = bm_src_alpha;
+    metal->currentDFactorAlpha = bm_inv_src_alpha;
+    metal->currentSurfaceId = -1;
+    metal->videoSurfaceId = -1;
+
+    metalInitShaders(metal, dataWin);
+    logInfo("Metal: initialized device %s (%u shaders)\n", metal->device.name.UTF8String, metal->gmlShaderCount);
 }
 
 static void metalDestroy(Renderer* renderer) {
-    MetalRenderer* metal = (MetalRenderer*) renderer;
-    [metal->encoder endEncoding];
-    metal->encoder = nil;
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    metalEndEncoder(metal);
+    metalDestroyShaders(metal);
     metal->commandBuffer = nil;
     metal->drawable = nil;
     metal->commandQueue = nil;
@@ -180,16 +502,22 @@ static void metalDestroy(Renderer* renderer) {
     free(metal->textureWidths);
     free(metal->textureHeights);
     free(metal->textureLoaded);
-    if (activeMetalRenderer == metal) activeMetalRenderer = nil;
+    free(metal->stagedTextures);
+    free(metal->surfaceTextures);
+    free(metal->surfaceWidth);
+    free(metal->surfaceHeight);
+    free(metal->surfaceAlive);
+    if (gActiveMetalRenderer == metal) gActiveMetalRenderer = nil;
     free(metal);
 }
 
-static void metalBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH,
-                            int32_t windowW, int32_t windowH) {
-    MetalRenderer* metal = (MetalRenderer*) renderer;
-    CAMetalLayer* layer = (__bridge CAMetalLayer*) platformGetMetalLayer();
+static void metalBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH) {
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    CAMetalLayer* layer = (__bridge CAMetalLayer*)platformGetMetalLayer();
     metal->windowW = windowW;
     metal->windowH = windowH;
+    metal->gameW = gameW;
+    metal->gameH = gameH;
 
     if (layer == nil || metal->commandQueue == nil) return;
     layer.drawableSize = CGSizeMake(windowW, windowH);
@@ -200,72 +528,147 @@ static void metalBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH,
         return;
     }
 
+    int32_t appId = renderer->runner->applicationSurfaceId;
+    if (appId >= 0 && (uint32_t)appId < metal->surfaceCount && metal->surfaceAlive[appId]) {
+        metalBindSurfaceTarget(metal, appId, false, MTLClearColorMake(0, 0, 0, 1));
+        metal->base.CPortX = 0;
+        metal->base.CPortY = 0;
+        metal->base.CPortW = gameW;
+        metal->base.CPortH = gameH;
+    }
+}
+
+static void metalEndFrameInit(MAYBE_UNUSED Renderer* renderer) {
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    // Manual application_surface draw path: leave the host clear of auto-blit.
+    if (renderer->runner->usingAppSurface && !renderer->runner->appSurfaceAutoDraw) {
+        metalEndEncoder(metal);
+        metal->currentTarget = nil;
+        metal->currentSurfaceId = -1;
+    }
+}
+
+void metalSetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
+                           MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH,
+                           bool renderingToUserSurface);
+
+static void metalEndFrameEnd(Renderer* renderer) {
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    if (renderer->runner->usingAppSurface && !renderer->runner->appSurfaceAutoDraw) {
+        return;
+    }
+    if (metal->commandBuffer == nil || metal->drawable == nil) return;
+
+    int32_t appId = renderer->runner->applicationSurfaceId;
+    if (appId < 0 || (uint32_t)appId >= metal->surfaceCount || !metal->surfaceAlive[appId]) return;
+
+    metalEndEncoder(metal);
+
+    // Present pass: clear drawable, letterbox-blit application_surface.
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = metal->drawable.texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     metal->encoder = [metal->commandBuffer renderCommandEncoderWithDescriptor:pass];
-    int32_t viewportW = windowW;
-    int32_t viewportH = windowH;
-    int32_t viewportX = 0;
-    int32_t viewportY = 0;
-    if (gameW > 0 && gameH > 0 && windowW > 0 && windowH > 0) {
-        if ((int64_t)windowW * gameH > (int64_t)windowH * gameW) {
-            viewportW = (int32_t)((int64_t)windowH * gameW / gameH);
-            viewportX = (windowW - viewportW) / 2;
-        } else {
-            viewportH = (int32_t)((int64_t)windowW * gameH / gameW);
-            viewportY = (windowH - viewportH) / 2;
-        }
+    metal->currentTarget = metal->drawable.texture;
+    metal->encoderTarget = metal->drawable.texture;
+    metal->currentSurfaceId = -1;
+
+    [metal->encoder setViewport:(MTLViewport){0, 0, (double)metal->windowW, (double)metal->windowH, 0, 1}];
+    [metal->encoder setScissorRect:(MTLScissorRect){0, 0, (NSUInteger)metal->windowW, (NSUInteger)metal->windowH}];
+
+    int32_t sx, sy, ex, ey;
+    int32_t gameW = metal->gameW, gameH = metal->gameH;
+    int32_t windowW = metal->windowW, windowH = metal->windowH;
+    int32_t effW, effH;
+    if ((gameW * windowH) / gameH < windowW) {
+        effW = (gameW * windowH) / gameH;
+        effH = windowH;
+    } else {
+        effW = windowW;
+        effH = (gameH * windowW) / gameW;
     }
-    [metal->encoder setViewport:(MTLViewport){(double)viewportX, (double)viewportY,
-                                               (double)viewportW, (double)viewportH, 0.0, 1.0}];
-    (void)gameW;
-    (void)gameH;
+    sx = (windowW - effW) / 2;
+    sy = (windowH - effH) / 2;
+    ex = sx + effW;
+    ey = sy + effH;
+
+    Matrix4f prevWVP = renderer->gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
+    Matrix4f_flipClipY(&prevWVP);
+    int32_t prevShader = metal->base.currentShader;
+    metal->base.currentShader = -1;
+    metalSetGuiProjection(renderer, windowW, windowH, windowW, windowH, false);
+    metalUploadDefaultUniforms(metal);
+
+    // Present pipeline is BGRA8 to match the CAMetalLayer drawable.
+    [metal->encoder setRenderPipelineState:metal->presentPipeline];
+    [metal->encoder setVertexBytes:&metal->defaultUniforms length:sizeof(MetalDefaultUniforms) atIndex:1];
+    [metal->encoder setFragmentBytes:&metal->defaultUniforms length:sizeof(MetalDefaultUniforms) atIndex:1];
+    [metal->encoder setFragmentSamplerState:metal->nearestSampler atIndex:0];
+    [metal->encoder setFragmentTexture:metal->surfaceTextures[appId] atIndex:0];
+
+    float x0 = (float)sx, y0 = (float)sy;
+    float x1 = (float)ex, y1 = (float)ey;
+    MetalVertex vertices[6];
+    float positions[8] = {x0, y0, x1, y0, x1, y1, x0, y1};
+    float uvs[8] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+    const int indices[6] = {0, 1, 2, 2, 3, 0};
+    Matrix4f* matrix = &renderer->gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
+    Matrix4f_flipClipY(&matrix);
+    for (int i = 0; i < 6; i++) {
+        int source = indices[i];
+        float clipX, clipY;
+        Matrix4f_transformPoint(matrix, positions[source * 2], positions[source * 2 + 1], &clipX, &clipY);
+        // Present path still transforms on CPU into clip space; zero out WVP to identity via uploading
+        // already-clipped verts by using an identity WVP for this draw.
+        vertices[i].position = (vector_float2){positions[source * 2], positions[source * 2 + 1]};
+        vertices[i].uv = (vector_float2){uvs[source * 2], uvs[source * 2 + 1]};
+        vertices[i].color = (vector_float4){1, 1, 1, 1};
+        (void)clipX; (void)clipY;
+    }
+    // Use GPU WVP from setGuiProjection (room/window space → clip).
+    [metal->encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
+    [metal->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+    renderer->gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION] = prevWVP;
+    metal->base.currentShader = prevShader;
+
+    metalEndEncoder(metal);
+    metal->currentTarget = nil;
 }
 
-static void metalEndFrameInit(MAYBE_UNUSED Renderer* renderer) {}
-
-static void metalEndFrameEnd(Renderer* renderer) {
-    MetalRenderer* metal = (MetalRenderer*) renderer;
-    if (metal->encoder == nil || metal->commandBuffer == nil || metal->drawable == nil) return;
-    [metal->encoder endEncoding];
-    metal->encoder = nil;
-}
-
-static void metalNoopView(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c,
-                          int32_t d, int32_t e, int32_t f, int32_t g, int32_t h, float i) {
-    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i;
-}
-static void metalNoopRenderer(MAYBE_UNUSED Renderer* renderer) {}
-static void metalApplyProjection(Renderer* renderer, const Matrix4f* viewMatrix, const Matrix4f* projectionMatrix) {
-    Matrix4f world = renderer->gmlMatrices[MATRIX_WORLD];
-    Matrix4f worldView;
-    Matrix4f worldViewProjection;
-    Matrix4f_multiply(&worldView, viewMatrix, &world);
-    Matrix4f_multiply(&worldViewProjection, projectionMatrix, &worldView);
-    renderer->gmlMatrices[MATRIX_VIEW] = *viewMatrix;
-    renderer->gmlMatrices[MATRIX_PROJECTION] = *projectionMatrix;
-    renderer->gmlMatrices[MATRIX_WORLD_VIEW] = worldView;
-    renderer->gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION] = worldViewProjection;
-}
 static void metalBeginView(Renderer* renderer, MAYBE_UNUSED int32_t viewX, MAYBE_UNUSED int32_t viewY,
-                           MAYBE_UNUSED int32_t viewW, MAYBE_UNUSED int32_t viewH, int32_t portX,
-                           int32_t portY, int32_t portW, int32_t portH, MAYBE_UNUSED float viewAngle) {
+                           MAYBE_UNUSED int32_t viewW, MAYBE_UNUSED int32_t viewH,
+                           int32_t portX, int32_t portY, int32_t portW, int32_t portH,
+                           MAYBE_UNUSED float viewAngle) {
+    MetalRenderer* metal = (MetalRenderer*)renderer;
+    // Views always render into the application surface (or its current binding).
+    int32_t appId = renderer->runner->applicationSurfaceId;
+    if (appId >= 0 && (metal->currentSurfaceId != appId || metal->encoderTarget == nil ||
+                       metal->encoderTarget != metal->surfaceTextures[appId])) {
+        metalBindSurfaceTarget(metal, appId, false, MTLClearColorMake(0, 0, 0, 1));
+    } else {
+        metalEnsureEncoder(metal, false, MTLClearColorMake(0, 0, 0, 1));
+    }
     renderer->CPortX = portX;
     renderer->CPortY = portY;
     renderer->CPortW = portW;
     renderer->CPortH = portH;
+    metalApplyViewportScissor(metal, portX, portY, portW, portH, true);
+
     int32_t viewCurrent = renderer->runner->viewsEnabled ? renderer->runner->viewCurrent : 0;
     RuntimeView* view = &renderer->runner->views[viewCurrent];
     renderer->cameraCurrent = view->cameraId;
     GMLCamera* camera = Runner_getCameraById(renderer->runner, renderer->cameraCurrent);
     metalApplyProjection(renderer, &camera->viewMatrix, &camera->projectionMatrix);
 }
-static void metalSetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
-                                  MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH,
-                                  bool renderingToUserSurface) {
+
+static void metalEndView(MAYBE_UNUSED Renderer* renderer) {}
+
+void metalSetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
+                           MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH,
+                           bool renderingToUserSurface) {
     renderer->cameraCurrent = GUI_CAMERA;
     GMLCamera* camera = &renderer->runner->guiCamera;
     camera->allocated = true;
@@ -282,569 +685,124 @@ static void metalSetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH
 
     Matrix4f projection;
     Matrix4f_Orthographic(&projection, (float)guiW, (float)guiH, 32000.0, 0.0);
-    if (renderingToUserSurface) Matrix4f_flipClipY(&projection);
+    Matrix4f_flipClipY(&projection);
+    //if (renderingToUserSurface) //Matrix4f_flipClipY(&projection);
     Matrix4f view;
     Matrix4f_identity(&view);
     Matrix4f_LookAt(&view, (float)guiW * 0.5f, (float)guiH * 0.5f, -16000.0,
-                   (float)guiW * 0.5f, (float)guiH * 0.5f, 16000.0,
-                   0.0, 1.0, 0.0);
+                    (float)guiW * 0.5f, (float)guiH * 0.5f, 16000.0,
+                    0.0, 1.0, 0.0);
     camera->viewMatrix = view;
     camera->projectionMatrix = projection;
     metalApplyProjection(renderer, &view, &projection);
 }
+
 static void metalBeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH,
-                          MAYBE_UNUSED int32_t portX, MAYBE_UNUSED int32_t portY,
-                          MAYBE_UNUSED int32_t portW, MAYBE_UNUSED int32_t portH,
-                          MAYBE_UNUSED int32_t targetSurfaceId) {
+                          int32_t portX, int32_t portY, int32_t portW, int32_t portH,
+                          int32_t targetSurfaceId) {
     MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (metal->encoder == nil && metal->commandBuffer != nil && metal->drawable != nil) {
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = metal->drawable.texture;
-        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        metal->encoder = [metal->commandBuffer renderCommandEncoderWithDescriptor:pass];
+    bool renderingToUserSurface = false;
+
+    if (targetSurfaceId == RENDER_TARGET_HOST_FRAMEBUFFER) {
+        // Rare: draw GUI straight to drawable.
+        metalEndEncoder(metal);
+        if (metal->drawable != nil) {
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = metal->drawable.texture;
+            pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            metal->encoder = [metal->commandBuffer renderCommandEncoderWithDescriptor:pass];
+            metal->currentTarget = metal->drawable.texture;
+            metal->encoderTarget = metal->drawable.texture;
+            metal->currentSurfaceId = -1;
+        }
+    } else if (targetSurfaceId >= 0) {
+        renderingToUserSurface = (targetSurfaceId != renderer->runner->applicationSurfaceId);
+        metalBindSurfaceTarget(metal, targetSurfaceId, false, MTLClearColorMake(0, 0, 0, 1));
     }
-    metalSetGuiProjection(renderer, guiW, guiH, portW, portH, false);
+
+    metalEnsureEncoder(metal, false, MTLClearColorMake(0, 0, 0, 1));
+    metalApplyViewportScissor(metal, portX, portY, portW, portH, true);
+    metalSetGuiProjection(renderer, guiW, guiH, portW, portH, renderingToUserSurface);
 }
+
 static void metalEndGUI(Renderer* renderer) {
     MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (metal->encoder != nil) {
-        [metal->encoder endEncoding];
-        metal->encoder = nil;
-    }
-}
-static void metalNoopDraw(MAYBE_UNUSED Renderer* renderer, const char* a, float b, float c, float d, float e, float f, float g) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; }
-static void metalNoopDrawColor(MAYBE_UNUSED Renderer* renderer, const char* a, float b, float c, float d, float e, float f, int32_t g, int32_t h, int32_t i, int32_t j, float k, float l) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; }
-static void metalClearScreen(MAYBE_UNUSED Renderer* renderer, uint32_t color, float alpha) { (void)color; (void)alpha; }
-static void metalNoopSprite(MAYBE_UNUSED Renderer* renderer, int32_t a, float b, float c, float d, float e, float f, float g, float h, uint32_t i, float j) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; }
-static void metalNoopSpritePart(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, float f, float g, float h, float i, float j, float k, float l, uint32_t m, float n) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; (void)m; (void)n; }
-static void metalDrawQuad(MetalRenderer* metal, TexturePageItem* tpag, uint32_t pageId,
-                          float x0, float y0, float x1, float y1, float x2, float y2,
-                          float x3, float y3, uint32_t color, float alpha,
-                          float u0, float v0, float u1, float v1) {
-    if (metal->encoder == nil || metal->pipeline == nil || !metalEnsureTextureLoaded(metal, pageId)) return;
-    Matrix4f* matrix = &metal->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
-    float positions[8] = {x0, y0, x1, y1, x2, y2, x3, y3};
-    MetalVertex vertices[6];
-    uint32_t bgr = color;
-    vector_float4 vertexColor = {BGR_R(bgr) / 255.0f, BGR_G(bgr) / 255.0f, BGR_B(bgr) / 255.0f, alpha};
-    const float uvs[8] = {u0, v0, u1, v0, u1, v1, u0, v1};
-    const int indices[6] = {0, 1, 2, 2, 3, 0};
-    for (int i = 0; i < 6; i++) {
-        int source = indices[i];
-        float clipX, clipY;
-        Matrix4f_transformPoint(matrix, positions[source * 2], positions[source * 2 + 1], &clipX, &clipY);
-        vertices[i].position = (vector_float2){clipX, clipY};
-        vertices[i].uv = (vector_float2){uvs[source * 2], uvs[source * 2 + 1]};
-        vertices[i].color = vertexColor;
-    }
-    [metal->encoder setRenderPipelineState:metal->pipeline];
-    [metal->encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-    id<MTLTexture> drawTexture = metal->textures[pageId];
-    if (metal->base.currentShader != -1 && metal->stagedTextures[0] != nil)
-        drawTexture = metal->stagedTextures[0];
-    [metal->encoder setFragmentTexture:drawTexture atIndex:0];
-    [metal->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-    (void)tpag;
+    (void)metal;
 }
 
-static bool metalResolveTpag(MetalRenderer* metal, int32_t tpagIndex, TexturePageItem** outTpag, uint32_t* outPageId) {
-    DataWin* dataWin = metal->base.dataWin;
-    if (tpagIndex < 0 || (uint32_t)tpagIndex >= dataWin->tpag.count) return false;
-    TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
-    if (tpag->texturePageId < 0 || (uint32_t)tpag->texturePageId >= metal->textureCount) return false;
-    *outTpag = tpag;
-    *outPageId = (uint32_t)tpag->texturePageId;
-    return true;
-}
-
-static void metalDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y, float originX,
-                            float originY, float xscale, float yscale, float angleDeg,
-                            uint32_t color, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
-    float localX0 = (float)tpag->targetX - originX;
-    float localY0 = (float)tpag->targetY - originY;
-    float localX1 = localX0 + (float)tpag->targetWidth;
-    float localY1 = localY0 + (float)tpag->targetHeight;
-    float angle = -angleDeg * ((float)M_PI / 180.0f);
-    Matrix4f transform;
-    Matrix4f_setTransform2D(&transform, x, y, xscale, yscale, angle);
-    float x0, y0, x1, y1, x2, y2, x3, y3;
-    Matrix4f_transformPoint(&transform, localX0, localY0, &x0, &y0);
-    Matrix4f_transformPoint(&transform, localX1, localY0, &x1, &y1);
-    Matrix4f_transformPoint(&transform, localX1, localY1, &x2, &y2);
-    Matrix4f_transformPoint(&transform, localX0, localY1, &x3, &y3);
-    float invW = 1.0f / (float)metal->textureWidths[pageId];
-    float invH = 1.0f / (float)metal->textureHeights[pageId];
-    metalDrawQuad(metal, tpag, pageId, x0, y0, x1, y1, x2, y2, x3, y3, color, alpha,
-                  tpag->sourceX * invW, tpag->sourceY * invH,
-                  (tpag->sourceX + tpag->sourceWidth) * invW,
-                  (tpag->sourceY + tpag->sourceHeight) * invH);
-}
-
-static void metalDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX,
-                                int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y,
-                                float xscale, float yscale, float angleDeg,
-                                float pivotX, float pivotY, uint32_t color, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
-    float angle = -angleDeg * ((float)M_PI / 180.0f);
-    float cosA = cosf(angle), sinA = sinf(angle);
-    float px[4] = {x, x + srcW * xscale, x + srcW * xscale, x};
-    float py[4] = {y, y, y + srcH * yscale, y + srcH * yscale};
-    for (int i = 0; i < 4; i++) {
-        float dx = px[i] - pivotX, dy = py[i] - pivotY;
-        px[i] = cosA * dx - sinA * dy + pivotX;
-        py[i] = sinA * dx + cosA * dy + pivotY;
-    }
-    float invW = 1.0f / (float)metal->textureWidths[pageId];
-    float invH = 1.0f / (float)metal->textureHeights[pageId];
-    float u0 = (tpag->sourceX + srcOffX + 0.5f) * invW;
-    float v0 = (tpag->sourceY + srcOffY + 0.5f) * invH;
-    float u1 = (tpag->sourceX + srcOffX + srcW - 0.5f) * invW;
-    float v1 = (tpag->sourceY + srcOffY + srcH - 0.5f) * invH;
-    metalDrawQuad(metal, tpag, pageId, px[0], py[0], px[1], py[1], px[2], py[2], px[3], py[3], color, alpha,
-                  u0, v0, u1, v1);
-}
-
-static void metalDrawSolidQuad(MetalRenderer* metal, float x0, float y0, float x1, float y1,
-                               float x2, float y2, float x3, float y3, uint32_t color, float alpha) {
-    if (metal->encoder == nil || metal->pipeline == nil || metal->whiteTexture == nil) return;
-    Matrix4f* matrix = &metal->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
-    float positions[8] = {x0, y0, x1, y1, x2, y2, x3, y3};
-    const int indices[6] = {0, 1, 2, 2, 3, 0};
-    MetalVertex vertices[6];
-    vector_float4 vertexColor = {BGR_R(color) / 255.0f, BGR_G(color) / 255.0f, BGR_B(color) / 255.0f, alpha};
-    for (int i = 0; i < 6; i++) {
-        int source = indices[i];
-        float clipX, clipY;
-        Matrix4f_transformPoint(matrix, positions[source * 2], positions[source * 2 + 1], &clipX, &clipY);
-        vertices[i].position = (vector_float2){clipX, clipY};
-        vertices[i].uv = (vector_float2){0.5f, 0.5f};
-        vertices[i].color = vertexColor;
-    }
-    [metal->encoder setRenderPipelineState:metal->pipeline];
-    [metal->encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-    [metal->encoder setFragmentTexture:metal->whiteTexture atIndex:0];
-    [metal->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-}
-
-static void metalDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2,
-                               uint32_t color, float alpha, bool outline) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (!outline) {
-        metalDrawSolidQuad(metal, x1, y1, x2 + 1, y1, x2 + 1, y2 + 1, x1, y2 + 1, color, alpha);
-        return;
-    }
-    metalDrawSolidQuad(metal, x1, y1, x2 + 1, y1, x2 + 1, y1 + 1, x1, y1 + 1, color, alpha);
-    metalDrawSolidQuad(metal, x1, y2, x2 + 1, y2, x2 + 1, y2 + 1, x1, y2 + 1, color, alpha);
-    metalDrawSolidQuad(metal, x1, y1 + 1, x1 + 1, y1 + 1, x1 + 1, y2, x1, y2, color, alpha);
-    metalDrawSolidQuad(metal, x2, y1 + 1, x2 + 1, y1 + 1, x2 + 1, y2, x2, y2, color, alpha);
-}
-
-static void metalDrawRectangleColor(Renderer* renderer, float x1, float y1, float x2, float y2,
-                                    uint32_t color1, MAYBE_UNUSED uint32_t color2,
-                                    MAYBE_UNUSED uint32_t color3, MAYBE_UNUSED uint32_t color4,
-                                    float alpha, bool outline) {
-    metalDrawRectangle(renderer, x1, y1, x2, y2, color1, alpha, outline);
-}
-
-static void metalDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2,
-                          float width, uint32_t color, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    float dx = x2 - x1, dy = y2 - y1;
-    float length = sqrtf(dx * dx + dy * dy);
-    if (length <= 0.0001f) return;
-    float px = -dy / length * width * 0.5f;
-    float py = dx / length * width * 0.5f;
-    metalDrawSolidQuad(metal, x1 + px, y1 + py, x1 - px, y1 - py,
-                       x2 - px, y2 - py, x2 + px, y2 + py, color, alpha);
-}
-
-static void metalDrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float originX,
-                                 float originY, float x, float y, float xscale, float yscale,
-                                 bool tileX, bool tileY, float roomW, float roomH,
-                                 uint32_t color, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
-    float tileW = tpag->boundingWidth * fabsf(xscale);
-    float tileH = tpag->boundingHeight * fabsf(yscale);
-    if (tileW <= 0.0f || tileH <= 0.0f) return;
-    float startX = tileX ? fmodf(x - originX * fabsf(xscale), tileW) : x - originX * fabsf(xscale);
-    float startY = tileY ? fmodf(y - originY * fabsf(yscale), tileH) : y - originY * fabsf(yscale);
-    if (startX > 0.0f) startX -= tileW;
-    if (startY > 0.0f) startY -= tileH;
-    float endX = tileX ? roomW : startX + tileW;
-    float endY = tileY ? roomH : startY + tileH;
-    float drawScaleX = xscale * (float)tpag->targetWidth / (float)tpag->sourceWidth;
-    float drawScaleY = yscale * (float)tpag->targetHeight / (float)tpag->sourceHeight;
-    for (float tileYPos = startY; tileYPos < endY; tileYPos += tileH) {
-        for (float tileXPos = startX; tileXPos < endX; tileXPos += tileW) {
-            metalDrawSpritePart(renderer, tpagIndex, 0, 0, tpag->sourceWidth, tpag->sourceHeight,
-                                tileXPos + originX * fabsf(xscale),
-                                tileYPos + originY * fabsf(yscale), drawScaleX, drawScaleY,
-                                0.0f, 0.0f, 0.0f, color, alpha);
-        }
-    }
-}
-
-static void metalDrawVideoQuad(MetalRenderer* metal, float x0, float y0, float x1, float y1,
-                               float x2, float y2, float x3, float y3, uint32_t color,
-                               float alpha, float u0, float v0, float u1, float v1) {
-    if (metal->encoder == nil || metal->pipeline == nil || metal->videoTexture == nil) return;
-    Matrix4f* matrix = &metal->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION];
-    float positions[8] = {x0, y0, x1, y1, x2, y2, x3, y3};
-    float uvs[8] = {u0, v0, u1, v0, u1, v1, u0, v1};
-    const int indices[6] = {0, 1, 2, 2, 3, 0};
-    MetalVertex vertices[6];
-    vector_float4 vertexColor = {BGR_R(color) / 255.0f, BGR_G(color) / 255.0f, BGR_B(color) / 255.0f, alpha};
-    for (int i = 0; i < 6; i++) {
-        int source = indices[i];
-        float clipX, clipY;
-        Matrix4f_transformPoint(matrix, positions[source * 2], positions[source * 2 + 1], &clipX, &clipY);
-        vertices[i].position = (vector_float2){clipX, clipY};
-        vertices[i].uv = (vector_float2){uvs[source * 2], uvs[source * 2 + 1]};
-        vertices[i].color = vertexColor;
-    }
-    [metal->encoder setRenderPipelineState:metal->pipeline];
-    [metal->encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-    [metal->encoder setFragmentTexture:metal->videoTexture atIndex:0];
-    [metal->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-}
-
-static void metalDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2,
-                               float y2, float x3, float y3, float x4, float y4, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    if (!metalResolveTpag(metal, tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
-    float invW = 1.0f / (float)metal->textureWidths[pageId];
-    float invH = 1.0f / (float)metal->textureHeights[pageId];
-    metalDrawQuad(metal, tpag, pageId, x1, y1, x2, y2, x3, y3, x4, y4, 0xFFFFFF, alpha,
-                  tpag->sourceX * invW, tpag->sourceY * invH,
-                  (tpag->sourceX + tpag->sourceWidth) * invW,
-                  (tpag->sourceY + tpag->sourceHeight) * invH);
-}
-
-static void metalDrawTextCommon(Renderer* renderer, const char* text, float x, float y,
-                                float xscale, float yscale, float angleDeg, float lineSeparation,
-                                uint32_t color, float alpha) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    DataWin* dataWin = renderer->dataWin;
-    if (renderer->drawFont < 0 || (uint32_t)renderer->drawFont >= dataWin->font.count || text == nullptr) {
-        if (!metalTextDiagnosticLogged) {
-            logDebug("Metal: text skipped (font=%d, fontCount=%u, text=%s)\n",
-                     renderer->drawFont, dataWin->font.count, text == nullptr ? "null" : "set");
-            metalTextDiagnosticLogged = true;
-        }
-        return;
-    }
-    Font* font = &dataWin->font.fonts[renderer->drawFont];
-
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    Sprite* spriteFont = nullptr;
-    if (font->isSpriteFont) {
-        if (font->spriteIndex < 0 || (uint32_t)font->spriteIndex >= dataWin->sprt.count) return;
-        spriteFont = &dataWin->sprt.sprites[font->spriteIndex];
-        tpag = nullptr;
-        pageId = 0;
-    } else {
-        if (font->tpagIndex < 0 || !metalResolveTpag(metal, font->tpagIndex, &tpag, &pageId) || !metalEnsureTextureLoaded(metal, pageId)) return;
-    }
-    if (!metalTextDiagnosticLogged) {
-        logDebug("Metal: text font=%d glyphs=%u spriteFont=%s tpag=%d encoder=%s\n",
-                 renderer->drawFont, font->glyphCount, font->isSpriteFont ? "yes" : "no",
-                 font->tpagIndex, metal->encoder == nil ? "closed" : "open");
-        metalTextDiagnosticLogged = true;
-    }
-    int32_t textLen = (int32_t)strlen(text);
-    if (textLen == 0) return;
-
-    float lineStride = lineSeparation < 0.0f ? TextUtils_lineStride(font) :
-        lineSeparation / (font->scaleY != 0.0f ? font->scaleY : 1.0f);
-    int32_t lineCount = TextUtils_countLines(text, textLen);
-    float valignOffset = renderer->drawValign == 1 ? -(float)lineCount * lineStride * 0.5f :
-                         renderer->drawValign == 2 ? -(float)lineCount * lineStride : 0.0f;
-    float angle = -angleDeg * ((float)M_PI / 180.0f);
-    Matrix4f transform;
-    Matrix4f_setTransform2D(&transform, x, y, xscale * font->scaleX, yscale * font->scaleY, angle);
-    float cursorY = valignOffset - (float)font->ascenderOffset;
-    int32_t lineStart = 0;
-    float invW = 0.0f;
-    float invH = 0.0f;
-    int32_t drawnGlyphs = 0;
-
-    for (int32_t line = 0; line < lineCount; line++) {
-        int32_t lineEnd = lineStart;
-        while (lineEnd < textLen && !TextUtils_isNewlineChar(text[lineEnd])) lineEnd++;
-        float cursorX = 0.0f;
-        float lineWidth = TextUtils_measureLineWidth(font, text + lineStart, lineEnd - lineStart);
-        if (renderer->drawHalign == 1) cursorX = -lineWidth * 0.5f;
-        else if (renderer->drawHalign == 2) cursorX = -lineWidth;
-        int32_t pos = 0;
-        while (pos < lineEnd - lineStart) {
-            uint16_t character = TextUtils_decodeUtf8(text + lineStart, lineEnd - lineStart, &pos);
-            FontGlyph* glyph = TextUtils_findGlyph(font, character);
-            if (glyph != nullptr) {
-                TexturePageItem* glyphTpag = tpag;
-                uint32_t glyphPageId = pageId;
-                if (spriteFont != nullptr) {
-                    int32_t glyphIndex = (int32_t)(glyph - font->glyphs);
-                    if (glyphIndex < 0 || (uint32_t)glyphIndex >= spriteFont->textureCount) {
-                        cursorX += glyph->shift;
-                        continue;
-                    }
-                    int32_t glyphTpagIndex = spriteFont->tpagIndices[glyphIndex];
-                    if (!metalResolveTpag(metal, glyphTpagIndex, &glyphTpag, &glyphPageId) ||
-                        !metalEnsureTextureLoaded(metal, glyphPageId)) {
-                        cursorX += glyph->shift;
-                        continue;
-                    }
-                }
-                invW = 1.0f / (float)metal->textureWidths[glyphPageId];
-                invH = 1.0f / (float)metal->textureHeights[glyphPageId];
-                float localX0 = cursorX + glyph->offset;
-                float localY0 = cursorY;
-                if (spriteFont != nullptr)
-                    localY0 += (float)(int32_t)glyphTpag->targetY - (float)font->spriteOriginYAdjust;
-                float localX1 = localX0 + glyph->sourceWidth;
-                float localY1 = localY0 + glyph->sourceHeight;
-                float x0, y0, x1, y1, x2, y2, x3, y3;
-                Matrix4f_transformPoint(&transform, localX0, localY0, &x0, &y0);
-                Matrix4f_transformPoint(&transform, localX1, localY0, &x1, &y1);
-                Matrix4f_transformPoint(&transform, localX1, localY1, &x2, &y2);
-                Matrix4f_transformPoint(&transform, localX0, localY1, &x3, &y3);
-                metalDrawQuad(metal, glyphTpag, glyphPageId, x0, y0, x1, y1, x2, y2, x3, y3, color, alpha,
-                              (glyphTpag->sourceX + glyph->sourceX) * invW,
-                              (glyphTpag->sourceY + glyph->sourceY) * invH,
-                              (glyphTpag->sourceX + glyph->sourceX + glyph->sourceWidth) * invW,
-                              (glyphTpag->sourceY + glyph->sourceY + glyph->sourceHeight) * invH);
-                if (!metalGlyphDiagnosticLogged) {
-                    float clipX, clipY;
-                    Matrix4f_transformPoint(&metal->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION], x0, y0, &clipX, &clipY);
-                    logDebug("Metal: first glyph world=(%.1f,%.1f) clip=(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) alpha=%.3f page=%u\n",
-                             x0, y0, clipX, clipY,
-                             (glyphTpag->sourceX + glyph->sourceX) * invW,
-                             (glyphTpag->sourceY + glyph->sourceY) * invH,
-                             (glyphTpag->sourceX + glyph->sourceX + glyph->sourceWidth) * invW,
-                             (glyphTpag->sourceY + glyph->sourceY + glyph->sourceHeight) * invH,
-                             alpha, glyphPageId);
-                    metalGlyphDiagnosticLogged = true;
-                }
-                drawnGlyphs++;
-                cursorX += glyph->shift;
-            }
-        }
-        cursorY += lineStride;
-        lineStart = lineEnd < textLen ? TextUtils_skipNewline(text, lineEnd, textLen) : lineEnd;
-    }
-    if (!metalVisibleTextDiagnosticLogged && alpha > 0.01f) {
-        logDebug("Metal: visible text submitted glyphs=%d alpha=%.3f font=%d\n",
-                 drawnGlyphs, alpha, renderer->drawFont);
-        metalVisibleTextDiagnosticLogged = true;
-    }
-    if (drawnGlyphs == 0)
-        logDebug("Metal: text submitted zero glyphs for font=%d\n", renderer->drawFont);
-}
-
-static void metalDrawText(Renderer* renderer, const char* text, float x, float y, float xscale,
-                          float yscale, float angleDeg, float lineSeparation) {
-    metalDrawTextCommon(renderer, text, x, y, xscale, yscale, angleDeg, lineSeparation,
-                        renderer->drawColor, renderer->drawAlpha);
-}
-
-static void metalDrawTextColor(Renderer* renderer, const char* text, float x, float y, float xscale,
-                               float yscale, float angleDeg, int32_t c1, MAYBE_UNUSED int32_t c2,
-                               MAYBE_UNUSED int32_t c3, MAYBE_UNUSED int32_t c4, float alpha,
-                               float lineSeparation) {
-    metalDrawTextCommon(renderer, text, x, y, xscale, yscale, angleDeg, lineSeparation,
-                        (uint32_t)c1, alpha);
-}
-static void metalNoopRect(MAYBE_UNUSED Renderer* renderer, float a, float b, float c, float d, uint32_t e, float f, bool g) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; }
-static void metalNoopRectColor(MAYBE_UNUSED Renderer* renderer, float a, float b, float c, float d, uint32_t e, uint32_t f, uint32_t g, uint32_t h, float i, bool j) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; }
-static void metalNoopLine(MAYBE_UNUSED Renderer* renderer, float a, float b, float c, float d, float e, uint32_t f, float g) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; }
-static void metalNoopLineColor(MAYBE_UNUSED Renderer* renderer, float a, float b, float c, float d, float e, uint32_t f, uint32_t g, float h) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; }
-static void metalNoopTriangle(MAYBE_UNUSED Renderer* renderer, float a, float b, float c, float d, float e, float f, uint32_t g, uint32_t h, uint32_t i, float j, bool k) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; }
-
-static BlendFactors metalBlendFactors(MAYBE_UNUSED Renderer* renderer) { return (BlendFactors){bm_src_alpha, bm_inv_src_alpha, bm_one, bm_inv_src_alpha}; }
-static int32_t metalBlendMode(MAYBE_UNUSED Renderer* renderer) { return bm_normal; }
-static void metalSetBlendMode(MAYBE_UNUSED Renderer* renderer, int32_t mode) { (void)mode; }
-static void metalSetBlendModeExt(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d) { (void)a; (void)b; (void)c; (void)d; }
-static void metalSetBlendEnable(Renderer* renderer, bool enabled) { ((MetalRenderer*)renderer)->blendEnabled = enabled; }
-static bool metalGetBlendEnable(Renderer* renderer) { return ((MetalRenderer*)renderer)->blendEnabled; }
-static void metalSetColorWrite(Renderer* renderer, bool r, bool g, bool b, bool a) { MetalRenderer* m = (MetalRenderer*)renderer; m->colorWriteR = r; m->colorWriteG = g; m->colorWriteB = b; m->colorWriteA = a; }
-static void metalGetColorWrite(Renderer* renderer, bool* r, bool* g, bool* b, bool* a) { MetalRenderer* m = (MetalRenderer*)renderer; *r = m->colorWriteR; *g = m->colorWriteG; *b = m->colorWriteB; *a = m->colorWriteA; }
-static void metalNoopBlendBool(MAYBE_UNUSED Renderer* renderer, bool value) { (void)value; }
-static void metalNoopBlendRef(MAYBE_UNUSED Renderer* renderer, uint8_t value) { (void)value; }
-static void metalNoopFog(MAYBE_UNUSED Renderer* renderer, bool a, uint32_t b) { (void)a; (void)b; }
-static void metalNoopTiled(MAYBE_UNUSED Renderer* renderer, int32_t a, float b, float c, float d, float e, float f, float g, bool h, bool i, float j, float k, uint32_t l, float m) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; (void)m; }
-static void metalNoopSurfaceTiled(MAYBE_UNUSED Renderer* renderer, int32_t a, float b, float c, float d, float e, float f, float g, uint32_t h, float i) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; }
-
-static int32_t metalCreateSurface(MAYBE_UNUSED Renderer* renderer, int32_t w, int32_t h) {
-    static bool logged;
-    if (!logged) {
-        logDebug("Metal: surface_create requested size=%dx%d (surfaces not implemented)\n", w, h);
-        logged = true;
-    }
-    return -1;
-}
-static int32_t metalCreateSprite(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, bool f, bool g, int32_t h, int32_t i) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; return -1; }
-static bool metalSurfaceExists(Renderer* renderer, int32_t id) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    return id == RENDERER_VIDEO_SURFACE_ID && metal->videoTexture != nil;
-}
-static bool metalSetTarget(MAYBE_UNUSED Renderer* renderer, int32_t id, bool implicitTarget) {
-    static bool logged;
-    if (!logged) {
-        logDebug("Metal: surface_set_target requested surface=%d implicit=%s (surfaces not implemented)\n",
-                 id, implicitTarget ? "yes" : "no");
-        logged = true;
-    }
-    return false;
-}
-static int32_t metalEnsureSurface(MAYBE_UNUSED Renderer* renderer, int32_t w, int32_t h) { (void)w; (void)h; return APPLICATION_SURFACE_ID; }
-static float metalSurfaceWidth(Renderer* renderer, int32_t id) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (id != RENDERER_VIDEO_SURFACE_ID) return 0.0f;
-    return metal->videoTexture == nil ? 0.0f : (float)metal->videoWidth;
-}
-static float metalSurfaceHeight(Renderer* renderer, int32_t id) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (id != RENDERER_VIDEO_SURFACE_ID) return 0.0f;
-    return metal->videoTexture == nil ? 0.0f : (float)metal->videoHeight;
-}
-static void metalDrawSurface(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, float f, float g, float h, float i, float j, uint32_t k, float l) {
-    static bool logged;
-    if (a == RENDERER_VIDEO_SURFACE_ID) {
-        MetalRenderer* metal = (MetalRenderer*)renderer;
-        if (metal->videoTexture == nil || metal->encoder == nil) return;
-        static bool logged;
-        if (!logged) {
-            logDebug("Metal: drawing video surface (%dx%d)\n", metal->videoWidth, metal->videoHeight);
-            logged = true;
-        }
-        int32_t srcWidth = d < 0 ? metal->videoWidth : d;
-        int32_t srcHeight = e < 0 ? metal->videoHeight : e;
-        if (srcWidth <= 0 || srcHeight <= 0) return;
-        float angle = -j * ((float)M_PI / 180.0f);
-        Matrix4f transform;
-        Matrix4f_setTransform2D(&transform, f, g, h, i, angle);
-        float x0, y0, x1, y1, x2, y2, x3, y3;
-        Matrix4f_transformPoint(&transform, 0.0f, 0.0f, &x0, &y0);
-        Matrix4f_transformPoint(&transform, (float)srcWidth, 0.0f, &x1, &y1);
-        Matrix4f_transformPoint(&transform, (float)srcWidth, (float)srcHeight, &x2, &y2);
-        Matrix4f_transformPoint(&transform, 0.0f, (float)srcHeight, &x3, &y3);
-        metalDrawVideoQuad(metal, x0, y0, x1, y1, x2, y2, x3, y3, k, l,
-                   (float)b / (float)metal->videoWidth,
-                   (float)c / (float)metal->videoHeight,
-                   (float)(b + srcWidth) / (float)metal->videoWidth,
-                   (float)(c + srcHeight) / (float)metal->videoHeight);
-        return;
-    }
-    if (!logged) {
-        logDebug("Metal: draw_surface requested surface=%d (surfaces not implemented)\n", a);
-        logged = true;
-    }
-    (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l;
-}
-static void metalDrawSurfaceColor(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, float f, float g, float h, float i, float j, uint32_t k, uint32_t l, uint32_t m, uint32_t n, float o) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; (void)m; (void)n; (void)o; }
-static void metalSurfaceResize(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c) { (void)a; (void)b; (void)c; }
-static void metalSurfaceFree(MAYBE_UNUSED Renderer* renderer, int32_t id) { (void)id; }
-static void metalSurfaceCopy(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f, int32_t g, int32_t h, bool i) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; }
-static bool metalSurfacePixels(MAYBE_UNUSED Renderer* renderer, int32_t id, uint8_t* pixels) { (void)id; (void)pixels; return false; }
-static uint32_t metalTexture(MAYBE_UNUSED Renderer* renderer, int32_t id) { (void)id; return 0; }
-static float metalTexel(MAYBE_UNUSED Renderer* renderer, uint32_t id) { (void)id; return 0.0f; }
-static bool metalUVs(MAYBE_UNUSED Renderer* renderer, uint32_t id, float* uvs) { (void)id; (void)uvs; return false; }
-static void metalTextureStage(Renderer* renderer, int32_t slot, uint32_t texture) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (slot < 0 || slot >= MAX_TEXTURE_STAGES) return;
-    metal->stagedTextures[slot] = nil;
-    if (texture == 0 || texture & 0x80000000U) return;
-    int32_t tpagIndex = (int32_t)texture - 1;
-    TexturePageItem* tpag;
-    uint32_t pageId;
-    if (metalResolveTpag(metal, tpagIndex, &tpag, &pageId) && metalEnsureTextureLoaded(metal, pageId))
-        metal->stagedTextures[slot] = metal->textures[pageId];
-}
-static void metalShader(MAYBE_UNUSED Renderer* renderer, int32_t id) {
-    static bool logged;
-    if (!logged) {
-        const char* name = "unknown";
-        size_t vertexLength = 0;
-        size_t fragmentLength = 0;
-        if (renderer->dataWin != nullptr && id >= 0 && (uint32_t)id < renderer->dataWin->shdr.count) {
-            Shader* shader = &renderer->dataWin->shdr.shaders[id];
-            name = shader->name != nullptr ? shader->name : "unnamed";
-            if (shader->glslES_Vertex != nullptr) vertexLength = strlen(shader->glslES_Vertex);
-            if (shader->glslES_Fragment != nullptr) fragmentLength = strlen(shader->glslES_Fragment);
-        }
-        logDebug("Metal: gpu_set_shader requested shader=%d name=%s GLSL=(%zu vertex,%zu fragment); custom shaders not implemented\n",
-                 id, name, vertexLength, fragmentLength);
-        logged = true;
-    }
-    renderer->currentShader = id;
-}
-static void metalResetShader(Renderer* renderer) { renderer->currentShader = -1; }
-static int32_t metalVideoUploadFrame(Renderer* renderer, int32_t width, int32_t height, const uint8_t* rgba) {
-    MetalRenderer* metal = (MetalRenderer*)renderer;
-    if (width <= 0 || height <= 0 || rgba == nullptr) return -1;
-    if (metal->videoTexture == nil || metal->videoWidth != width || metal->videoHeight != height) {
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                                 width:(NSUInteger)width height:(NSUInteger)height mipmapped:NO];
-        descriptor.usage = MTLTextureUsageShaderRead;
-        metal->videoTexture = [metal->device newTextureWithDescriptor:descriptor];
-        metal->videoWidth = width;
-        metal->videoHeight = height;
-    }
-    [metal->videoTexture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)width, (NSUInteger)height)
-                           mipmapLevel:0 withBytes:rgba bytesPerRow:(NSUInteger)width * 4];
-    return RENDERER_VIDEO_SURFACE_ID;
-}
-static int32_t metalUniform(MAYBE_UNUSED Renderer* renderer, int32_t id, char* name) { (void)id; (void)name; return -1; }
-static void metalUniformF(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, float c, float d, float e, float f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; }
-static void metalUniformFA(MAYBE_UNUSED Renderer* renderer, int32_t a, float* b, uint32_t c) { (void)a; (void)b; (void)c; }
-static void metalUniformI(MAYBE_UNUSED Renderer* renderer, int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; }
-static bool metalShaderCompiled(MAYBE_UNUSED Renderer* renderer, int32_t id) { (void)id; return false; }
-static bool metalShadersSupported(void) { return false; }
-static void metalSetMatrix(MAYBE_UNUSED Renderer* renderer, int32_t type, Matrix4f matrix) { (void)type; (void)matrix; }
+static void metalFlush(MAYBE_UNUSED Renderer* renderer) {}
 
 static RendererVtable metalVtable = {
-    .init = metalInit, .destroy = metalDestroy, .beginFrame = metalBeginFrame,
-    .endFrameInit = metalEndFrameInit, .endFrameEnd = metalEndFrameEnd,
-    .beginView = metalBeginView, .endView = metalNoopRenderer, .applyProjection = metalApplyProjection,
-    .beginGUI = metalBeginGUI, .setGuiProjection = metalSetGuiProjection, .endGUI = metalEndGUI,
-    .drawSprite = metalDrawSprite, .drawSpritePart = metalDrawSpritePart, .drawSpritePos = metalDrawSpritePos,
-    .drawRectangle = metalDrawRectangle, .drawRectangleColor = metalDrawRectangleColor, .drawLine = metalDrawLine,
-    .drawTriangle = metalNoopTriangle, .drawLineColor = metalNoopLineColor, .drawText = metalDrawText,
-    .drawTextColor = metalDrawTextColor, .flush = metalNoopRenderer, .clearScreen = metalClearScreen,
-    .createSpriteFromSurface = metalCreateSprite, .deleteSprite = metalSurfaceFree,
-    .gpuGetBlendFactors = metalBlendFactors, .gpuGetBlendMode = metalBlendMode,
-    .gpuSetBlendMode = metalSetBlendMode, .gpuSetBlendModeExt = metalSetBlendModeExt,
-    .gpuSetBlendEnable = metalSetBlendEnable, .gpuSetAlphaTestEnable = metalNoopBlendBool,
-    .gpuSetAlphaTestRef = metalNoopBlendRef, .gpuSetColorWriteEnable = metalSetColorWrite,
-    .gpuGetColorWriteEnable = metalGetColorWrite, .gpuGetBlendEnable = metalGetBlendEnable,
-    .gpuSetFog = metalNoopFog, .drawSpriteTiled = metalDrawSpriteTiled, .drawSurfaceTiled = metalNoopSurfaceTiled,
-    .createSurface = metalCreateSurface, .surfaceExists = metalSurfaceExists, .setRenderTarget = metalSetTarget,
-    .ensureApplicationSurface = metalEnsureSurface, .getSurfaceWidth = metalSurfaceWidth,
-    .getSurfaceHeight = metalSurfaceHeight, .drawSurface = metalDrawSurface, .drawSurfaceColor = metalDrawSurfaceColor,
+    .init = metalInit,
+    .destroy = metalDestroy,
+    .beginFrame = metalBeginFrame,
+    .endFrameInit = metalEndFrameInit,
+    .endFrameEnd = metalEndFrameEnd,
+    .beginView = metalBeginView,
+    .endView = metalEndView,
+    .applyProjection = metalApplyProjection,
+    .beginGUI = metalBeginGUI,
+    .setGuiProjection = metalSetGuiProjection,
+    .endGUI = metalEndGUI,
+    .drawSprite = metalDrawSprite,
+    .drawSpritePart = metalDrawSpritePart,
+    .drawSpritePos = metalDrawSpritePos,
+    .drawRectangle = metalDrawRectangle,
+    .drawRectangleColor = metalDrawRectangleColor,
+    .drawLine = metalDrawLine,
+    .drawTriangle = metalDrawTriangle,
+    .drawLineColor = metalDrawLineColor,
+    .drawText = metalDrawText,
+    .drawTextColor = metalDrawTextColor,
+    .flush = metalFlush,
+    .clearScreen = metalClearScreen,
+    .createSpriteFromSurface = metalCreateSpriteFromSurface,
+    .deleteSprite = metalDeleteSprite,
+    .gpuGetBlendFactors = metalGpuGetBlendFactors,
+    .gpuGetBlendMode = metalGpuGetBlendMode,
+    .gpuSetBlendMode = metalGpuSetBlendMode,
+    .gpuSetBlendModeExt = metalGpuSetBlendModeExt,
+    .gpuSetBlendEnable = metalGpuSetBlendEnable,
+    .gpuSetAlphaTestEnable = metalGpuSetAlphaTestEnable,
+    .gpuSetAlphaTestRef = metalGpuSetAlphaTestRef,
+    .gpuSetColorWriteEnable = metalGpuSetColorWriteEnable,
+    .gpuGetColorWriteEnable = metalGpuGetColorWriteEnable,
+    .gpuGetBlendEnable = metalGpuGetBlendEnable,
+    .gpuSetFog = metalGpuSetFog,
+    .drawTile = nullptr,
+    .drawSpriteTiled = metalDrawSpriteTiled,
+    .drawSurfaceTiled = metalDrawSurfaceTiled,
+    .createSurface = metalCreateSurface,
+    .surfaceExists = metalSurfaceExists,
+    .setRenderTarget = metalSetRenderTarget,
+    .ensureApplicationSurface = metalEnsureApplicationSurface,
+    .getSurfaceWidth = metalGetSurfaceWidth,
+    .getSurfaceHeight = metalGetSurfaceHeight,
+    .drawSurface = metalDrawSurface,
+    .drawSurfaceColor = metalDrawSurfaceColor,
     .surfaceResize = metalSurfaceResize,
-    .surfaceFree = metalSurfaceFree, .surfaceCopy = metalSurfaceCopy, .surfaceGetPixels = metalSurfacePixels,
-    .spriteGetTexture = metalTexture, .surfaceGetTexture = metalTexture,
-    .textureGetTexelWidth = metalTexel, .textureGetTexelHeight = metalTexel, .textureGetUVs = metalUVs,
-    .textureSetStage = metalTextureStage, .gpuSetShader = metalShader, .gpuResetShader = metalResetShader,
-    .shaderGetUniform = metalUniform, .shaderGetSamplerIndex = metalUniform,
-    .shaderSetUniformF = metalUniformF, .shaderSetUniformFArray = metalUniformFA,
-    .shaderSetUniformI = metalUniformI, .shaderIsCompiled = metalShaderCompiled,
-    .shadersSupported = metalShadersSupported, .setMatrix = metalSetMatrix,
-    .videoUploadFrame = metalVideoUploadFrame
+    .surfaceFree = metalSurfaceFree,
+    .surfaceCopy = metalSurfaceCopy,
+    .surfaceGetPixels = metalSurfaceGetPixels,
+    .drawTiledPart = metalDrawTiledPart,
+    .gpuSetShader = metalGpuSetShader,
+    .gpuResetShader = metalGpuResetShader,
+    .shaderGetUniform = metalShaderGetUniform,
+    .shaderGetSamplerIndex = metalShaderGetSamplerIndex,
+    .shaderSetUniformF = metalShaderSetUniformF,
+    .shaderSetUniformFArray = metalShaderSetUniformFArray,
+    .shaderSetUniformI = metalShaderSetUniformI,
+    .spriteGetTexture = metalSpriteGetTexture,
+    .surfaceGetTexture = metalSurfaceGetTexture,
+    .textureGetTexelWidth = metalTextureGetTexelWidth,
+    .textureGetTexelHeight = metalTextureGetTexelHeight,
+    .textureGetUVs = metalTextureGetUVs,
+    .textureSetStage = metalTextureSetStage,
+    .shaderIsCompiled = metalShaderIsCompiled,
+    .shadersSupported = metalShadersSupported,
+    .setMatrix = metalSetMatrix,
+    .videoUploadFrame = metalVideoUploadFrame,
 };
 
 Renderer* MetalRenderer_create(void) {
@@ -857,27 +815,26 @@ Renderer* MetalRenderer_create(void) {
     metal->base.drawValign = 0;
     metal->base.circlePrecision = 24;
     metal->base.currentShader = -1;
-    activeMetalRenderer = metal;
+    gActiveMetalRenderer = metal;
     return &metal->base;
 }
 
 void MetalRenderer_presentFrame(void) {
-    MetalRenderer* metal = activeMetalRenderer;
+    MetalRenderer* metal = gActiveMetalRenderer;
     if (metal == nil || metal->commandBuffer == nil || metal->drawable == nil) return;
-    if (metal->encoder != nil) {
-        [metal->encoder endEncoding];
-        metal->encoder = nil;
-    }
+    metalEndEncoder(metal);
     [metal->commandBuffer presentDrawable:metal->drawable];
     [metal->commandBuffer commit];
     metal->presentedCommandBuffer = metal->commandBuffer;
     metal->commandBuffer = nil;
     metal->drawable = nil;
+    metal->currentTarget = nil;
+    metal->currentSurfaceId = -1;
 }
 
 void MetalRenderer_waitForPresentedFrame(void) {
-    if (activeMetalRenderer != nil && activeMetalRenderer->presentedCommandBuffer != nil) {
-        [activeMetalRenderer->presentedCommandBuffer waitUntilCompleted];
-        activeMetalRenderer->presentedCommandBuffer = nil;
+    if (gActiveMetalRenderer != nil && gActiveMetalRenderer->presentedCommandBuffer != nil) {
+        [gActiveMetalRenderer->presentedCommandBuffer waitUntilCompleted];
+        gActiveMetalRenderer->presentedCommandBuffer = nil;
     }
 }
