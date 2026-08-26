@@ -41,7 +41,8 @@ static const OsTypeNameEntry OS_TYPE_NAMES[] = {
 enum GraphicsAPI {
     SOFTWARE,
     MODERN_GL,
-    LEGACY_GL
+    LEGACY_GL,
+    METAL
 };
 
 extern enum GraphicsAPI gfx;
@@ -135,6 +136,10 @@ bool platformGetScaledWindowSize(int32_t* outW, int32_t* outH);
 void platformSetWindowSize(int32_t width, int32_t height);
 void platformSetWindowTitle(const char* title);
 void platformSleepUntil(uint64_t time);
+
+#ifdef ENABLE_METAL
+void *platformGetMetalLayer(void);
+#endif
 
 extern InputRecording *globalInputRecording;
 

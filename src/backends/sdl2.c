@@ -2,6 +2,9 @@
 #include "stdio_compat.h"
 
 #include <SDL2/SDL.h>
+#ifdef ENABLE_METAL
+#include <SDL2/SDL_metal.h>
+#endif
 
 #include "common.h"
 #include "input_recording.h"
@@ -20,6 +23,9 @@ static uint32_t fpsFrames = 0;
 static Runner *g_runner;
 static SDL_Surface* scr;
 static SDL_Window *window;
+#ifdef ENABLE_METAL
+static SDL_MetalView metalView;
+#endif
 static SDL_GameController* openControllers[MAX_GAMEPADS];
 
 static void platformUpdateFPS(void) {
@@ -95,6 +101,11 @@ static SDL_Window *tryOpenWindow(int reqW, int reqH, const char* title, Uint32 f
         }
         return nullptr;
     }
+#ifdef ENABLE_METAL
+    if (gfx == METAL)
+        return SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                reqW, reqH, flags | SDL_WINDOW_METAL);
+#endif
     for (size_t i = 0; i < sizeof(GLCommon_versions)/sizeof(GLCommon_versions[0]); i++) {
         SDL_Window *newWindow;
         int contextFlags = 0;
@@ -234,7 +245,7 @@ bool platformInit(int reqW, int reqH, const char *title, bool headless) {
 
     Uint32 flags = 0;
 
-if (gfx != SOFTWARE)
+    if (gfx != SOFTWARE && gfx != METAL)
     flags |= SDL_WINDOW_OPENGL;
 
     if (headless)
@@ -273,7 +284,7 @@ flags |= SDL_WINDOW_ALLOW_HIGHDPI;
         logError("Fatal: Could not set any video mode: %s\n", SDL_GetError());
         return false;
     }
-    if (gfx != SOFTWARE) {
+    if (gfx != SOFTWARE && gfx != METAL) {
 #ifndef PLATFORM_VITA
         SDL_GL_SetSwapInterval(0); // disable vsync
 #endif
@@ -282,6 +293,17 @@ flags |= SDL_WINDOW_ALLOW_HIGHDPI;
     }
     // If we don't do this, the window will be larger than it should be on HiDPI displays.
     platformSetWindowSize(reqW, reqH);
+
+#ifdef ENABLE_METAL
+    if (gfx == METAL) {
+        metalView = SDL_Metal_CreateView(window);
+        if (!metalView) {
+            logError("Metal: failed to create SDL Metal view: %s\n", SDL_GetError());
+            return false;
+        }
+        logDebug("Metal: SDL Metal view created\n");
+    }
+#endif
 
 #ifdef BUTTERSCOTCH_PLATFORM_IOS
     IOSTouchControls_install(window, platformTouchControlKeyChanged,
@@ -305,6 +327,12 @@ flags |= SDL_WINDOW_ALLOW_HIGHDPI;
 void platformExit(void) {
 #ifdef BUTTERSCOTCH_PLATFORM_IOS
     IOSTouchControls_remove();
+#endif
+#ifdef ENABLE_METAL
+    if (metalView) {
+        SDL_Metal_DestroyView(metalView);
+        metalView = nullptr;
+    }
 #endif
     for (int i = 0; i < MAX_GAMEPADS; i++) {
         if (openControllers[i]) {
@@ -391,6 +419,12 @@ void platformSwapBuffers(void) {
 
     platformUpdateFPS();
 }
+
+#ifdef ENABLE_METAL
+void *platformGetMetalLayer(void) {
+    return metalView ? SDL_Metal_GetLayer(metalView) : nullptr;
+}
+#endif
 
 #if defined(ENABLE_MODERN_GL) || defined(ENABLE_LEGACY_GL)
 

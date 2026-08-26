@@ -29,17 +29,26 @@ endif()
 
 set(ENABLE_LEGACY_GL OFF CACHE BOOL "Enable the legacy OpenGL renderer")
 set(ENABLE_MODERN_GL ON CACHE BOOL "Enable the modern OpenGL renderer")
+set(ENABLE_METAL OFF CACHE BOOL "Enable the Metal renderer")
 
 if(ENABLE_LEGACY_GL)
     message(FATAL_ERROR "The legacy OpenGL renderer is not supported on iOS.")
 endif()
 
-if(NOT ENABLE_MODERN_GL)
-    message(FATAL_ERROR "The iOS port requires the modern GLES renderer.")
+if(ENABLE_METAL)
+    if(ENABLE_MODERN_GL)
+        message(STATUS "Metal renderer selected; disabling the modern OpenGL renderer.")
+        set(ENABLE_MODERN_GL OFF CACHE BOOL "Enable the modern OpenGL renderer" FORCE)
+    endif()
+elseif(NOT ENABLE_MODERN_GL)
+    message(FATAL_ERROR "Enable one of ENABLE_MODERN_GL or ENABLE_METAL.")
 endif()
 
 # iOS frameworks
-find_library(IOS_OPENGLES_FRAMEWORK OpenGLES REQUIRED)
+if(ENABLE_MODERN_GL)
+    find_library(IOS_OPENGLES_FRAMEWORK OpenGLES REQUIRED)
+endif()
+find_library(IOS_METAL_FRAMEWORK Metal REQUIRED)
 find_library(IOS_UIKIT_FRAMEWORK UIKit REQUIRED)
 find_library(IOS_FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(IOS_PHOTOS_FRAMEWORK Photos REQUIRED)
@@ -108,8 +117,9 @@ add_compile_definitions(
     BUTTERSCOTCH_COMMIT_HASH="${BUTTERSCOTCH_COMMIT_HASH}"
     BUTTERSCOTCH_COMMIT_DATE="${BUTTERSCOTCH_COMMIT_DATE}"
     BUTTERSCOTCH_PLATFORM_IOS
-    ENABLE_GLES
-    ENABLE_MODERN_GL
+    $<$<BOOL:${ENABLE_MODERN_GL}>:ENABLE_GLES>
+    $<$<BOOL:${ENABLE_MODERN_GL}>:ENABLE_MODERN_GL>
+    $<$<BOOL:${ENABLE_METAL}>:ENABLE_METAL>
     GL_GLEXT_PROTOTYPES=1
     USE_MINIAUDIO
     USE_SDL2
@@ -145,8 +155,6 @@ endforeach()
 file(GLOB SOURCES
     src/*.c
     src/backends/sdl2.c
-    src/gl_common/gl_common.c
-    src/gl/gl_renderer.c
 )
 
 file(GLOB IOS_SOURCES
@@ -160,11 +168,18 @@ file(GLOB AUDIO_SOURCES
     src/audio/miniaudio/*.m
 )
 
-file(GLOB GL_SOURCES
-    src/image/*.c
-    src/gl_common/*.c
-    src/gl/*.c
-)
+if(ENABLE_MODERN_GL)
+    file(GLOB GL_SOURCES
+        src/image/*.c
+        src/gl_common/*.c
+        src/gl/*.c
+    )
+    list(APPEND SOURCES ${GL_SOURCES})
+elseif(ENABLE_METAL)
+    file(GLOB METAL_IMAGE_SOURCES src/image/*.c)
+    list(APPEND SOURCES ${METAL_IMAGE_SOURCES})
+    list(APPEND SOURCES src/metal/metal_renderer.m)
+endif()
 
 # Dependencies
 add_subdirectory(vendor/SDL2 ${CMAKE_BINARY_DIR}/SDL2)
@@ -284,7 +299,6 @@ add_executable(butterscotch
     ${SOURCES}
     ${IOS_SOURCES}
     ${AUDIO_SOURCES}
-    ${GL_SOURCES}
     ${BUILD_INFO_SWIFT}
     vendor/md5/md5.c
     vendor/base64/base64.c
@@ -295,11 +309,17 @@ target_include_directories(butterscotch PRIVATE
     ${CMAKE_SOURCE_DIR}/src/ios
     ${CMAKE_SOURCE_DIR}/src/gl
     ${CMAKE_SOURCE_DIR}/src/gl_common
+    ${CMAKE_SOURCE_DIR}/src/metal
     ${CMAKE_SOURCE_DIR}/src/image
     ${CMAKE_SOURCE_DIR}/src/audio/miniaudio
     ${SDL2_INCLUDE_DIRS}
-    ${CMAKE_OSX_SYSROOT}/System/Library/Frameworks/OpenGLES.framework/Headers
 )
+
+if(ENABLE_MODERN_GL)
+    target_include_directories(butterscotch PRIVATE
+        ${CMAKE_OSX_SYSROOT}/System/Library/Frameworks/OpenGLES.framework/Headers
+    )
+endif()
 
 target_include_directories(butterscotch SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/vendor/miniaudio
@@ -319,7 +339,8 @@ target_link_libraries(butterscotch PRIVATE
     stb_ds
     stb_vorbis
     sha1
-    ${IOS_OPENGLES_FRAMEWORK}
+    $<$<BOOL:${ENABLE_MODERN_GL}>:${IOS_OPENGLES_FRAMEWORK}>
+    $<$<BOOL:${ENABLE_METAL}>:${IOS_METAL_FRAMEWORK}>
     ${IOS_UIKIT_FRAMEWORK}
     ${IOS_FOUNDATION_FRAMEWORK}
     ${IOS_PHOTOS_FRAMEWORK}

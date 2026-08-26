@@ -166,7 +166,11 @@ int IOSLauncher_startGame(const char *dataWinPath, const char *saveFolder,
     args.recordInputsPath = settings->recordInputsPath;
     args.playbackInputsPath = settings->playbackInputsPath;
 
+#ifdef ENABLE_METAL
+    args.renderer = METAL;
+#else
     args.renderer = MODERN_GL;
+#endif
     args.osType = settings->osType;
 
     args.windowWidth = settings->windowWidth;

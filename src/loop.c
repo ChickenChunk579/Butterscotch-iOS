@@ -47,6 +47,9 @@
 #ifdef ENABLE_SW_RENDERER
 #include "sw_renderer.h"
 #endif
+#ifdef ENABLE_METAL
+#include "metal_renderer.h"
+#endif
 #include "overlay_file_system.h"
 #if defined(USE_OPENAL)
 #include "al_audio_system.h"
@@ -854,6 +857,10 @@ int loop(CommandLineArgs args, const char *argv0) {
             renderer = GLRenderer_create();
             hostFramebuffer = &((GLRenderer *)renderer)->hostFramebuffer;
         }
+#endif
+#ifdef ENABLE_METAL
+        if (gfx == METAL)
+            renderer = MetalRenderer_create();
 #endif
         if (!renderer) {
             logError("Failed to initialize a renderer\n");
