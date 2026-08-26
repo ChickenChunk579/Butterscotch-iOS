@@ -4,13 +4,8 @@
 #include "common.h"
 #include <stdint.h>
 
-<<<<<<< HEAD
 #if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(__APPLE__)
 #include <OpenGLES/ES3/gl.h>
-=======
-#if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(__SWITCH__)
-#include <GLES3/gl3.h>
->>>>>>> upstream/main
 #elif PLATFORM_PS3
 #include "ps3gl.h"
 #include "rsxutil.h"

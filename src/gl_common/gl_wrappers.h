@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 #if !defined(_BS_GL_WRAPPERS_H_) && !defined(__EMSCRIPTEN__) && !defined(PLATFORM_PS3) && !defined(PLATFORM_VITA) && !defined(__ANDROID__) && !defined(__APPLE__)
-=======
-#if !defined(_BS_GL_WRAPPERS_H_) && !defined(__EMSCRIPTEN__) && !defined(PLATFORM_PS3) && !defined(PLATFORM_VITA) && !defined(__ANDROID__) && !defined(__SWITCH__)
->>>>>>> upstream/main
 #define _BS_GL_WRAPPERS_H_
 
 static inline void gl_init_wrappers(void) {
