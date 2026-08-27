@@ -2,26 +2,24 @@ import SwiftUI
 
 struct LauncherView: View {
     
-    @State private var selectedTab = 0
+    @State private var selectedTab = 1
 
     var body: some View {
         TabView(selection: $selectedTab) {
-
-            
-            GamesView()
-                .tabItem {
-                    Label(
-                        "Games",
-                        systemImage: "play.fill"
-                    )
-                }
-                .tag(0)
-            
             SettingsView()
                 .tabItem {
                     Label(
                         "Settings",
                         systemImage: "gearshape"
+                    )
+                }
+                .tag(0)
+
+            GamesView()
+                .tabItem {
+                    Label(
+                        "Library",
+                        systemImage: "play.fill"
                     )
                 }
                 .tag(1)

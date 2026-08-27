@@ -22,3 +22,18 @@ cmake -S . -B build-ios-simulator \
   -DENABLE_MODERN_GL=ON \
   -DENABLE_METAL=ON \
   -DAUDIO_BACKEND=miniaudio
+  
+
+
+cmake -S . -B build-ios-simulator \
+  -G Ninja \
+  -DBACKEND=sdl2 \
+  -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_OSX_SYSROOT=iphonesimulator \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+  -DCMAKE_Swift_FLAGS="-target arm64-apple-ios17.0-simulator" \
+  -DENABLE_LEGACY_GL=OFF \
+  -DENABLE_MODERN_GL=ON \
+  -DENABLE_METAL=ON \
+  -DAUDIO_BACKEND=miniaudio

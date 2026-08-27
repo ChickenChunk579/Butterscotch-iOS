@@ -14,7 +14,7 @@ struct GameEditorView: View {
 
     @State private var name: String
     @State private var description: String
-    @State private var icon: UIImage?
+    @State private var steamAppID: String
 
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var showingFilePicker = false
@@ -33,12 +33,9 @@ struct GameEditorView: View {
                 initialValue: game.description
             )
 
-        _icon =
+        _steamAppID =
             State(
-                initialValue:
-                    GameStore.shared.icon(
-                        for: game
-                    )
+                initialValue: game.steamAppID
             )
     }
 
@@ -48,7 +45,7 @@ struct GameEditorView: View {
 
             Form {
 
-                Section("Game") {
+                Section("Metadata") {
 
                     TextField(
                         "Name",
@@ -60,75 +57,15 @@ struct GameEditorView: View {
                         text: $description,
                         axis: .vertical
                     )
+                    
+                    TextField(
+                        "Steam App ID",
+                        text: $steamAppID,
+                        axis: .vertical
+                    )
                 }
 
-                Section("Icon") {
-
-                    HStack {
-
-                        if let icon {
-
-                            Image(uiImage: icon)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(
-                                    width: 64,
-                                    height: 64
-                                )
-                                .clipShape(
-                                    RoundedRectangle(
-                                        cornerRadius: 12
-                                    )
-                                )
-
-                        } else {
-
-                            Image(
-                                systemName:
-                                    "photo"
-                            )
-                            .font(.system(size: 32))
-                            .foregroundStyle(.secondary)
-                            .frame(
-                                width: 64,
-                                height: 64
-                            )
-                        }
-
-                        VStack(
-                            alignment: .leading
-                        ) {
-
-                            PhotosPicker(
-                                selection:
-                                    $selectedPhoto,
-                                matching: .images
-                            ) {
-                                Text(
-                                    icon == nil
-                                        ? "Choose Photo"
-                                        : "Change Photo"
-                                )
-                            }
-
-                            Button(
-                                "Choose from Files"
-                            ) {
-                                showingFilePicker = true
-                            }
-
-                            if icon != nil {
-
-                                Button(
-                                    "Remove Icon",
-                                    role: .destructive
-                                ) {
-                                    icon = nil
-                                }
-                            }
-                        }
-                    }
-                }
+                
             }
             .navigationTitle(
                 originalGame.name.isEmpty
@@ -156,13 +93,6 @@ struct GameEditorView: View {
                     }
                 }
             }
-            .onChange(
-                of: selectedPhoto
-            ) {
-                _, newValue in
-
-                loadPhoto(newValue)
-            }
             .fileImporter(
                 isPresented:
                     $showingFilePicker,
@@ -174,30 +104,6 @@ struct GameEditorView: View {
                 result in
 
                 loadFile(result)
-            }
-        }
-    }
-
-    private func loadPhoto(
-        _ item: PhotosPickerItem?
-    ) {
-
-        guard let item else {
-            return
-        }
-
-        Task {
-
-            if let data =
-                try? await item.loadTransferable(
-                    type: Data.self
-                ),
-                let image =
-                UIImage(data: data!) {
-
-                await MainActor.run {
-                    icon = image
-                }
             }
         }
     }
@@ -230,8 +136,6 @@ struct GameEditorView: View {
         else {
             return
         }
-
-        icon = image
     }
 
     private func save() {
@@ -245,35 +149,9 @@ struct GameEditorView: View {
 
         game.description =
             description
-
-        if let icon {
-
-            let iconRel =
-                "\(game.id)/icon.png"
-
-            let iconURL =
-                store.gamesDirectory
-                    .appendingPathComponent(
-                        iconRel
-                    )
-
-            return
-
-            game.iconRel = iconRel
-
-        } else {
-
-            if let oldIcon =
-                store.iconURL(for: game) {
-
-                try? FileManager.default
-                    .removeItem(
-                        at: oldIcon
-                    )
-            }
-
-            game.iconRel = nil
-        }
+        
+        game.steamAppID =
+            steamAppID
 
         store.update(game)
 

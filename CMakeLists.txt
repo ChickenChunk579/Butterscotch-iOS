@@ -53,6 +53,7 @@ find_library(IOS_GAMECONTROLLER_FRAMEWORK GameController)
 find_library(IOS_VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
 find_library(IOS_Z_LIBRARY z REQUIRED)
 find_library(IOS_ICONV_LIBRARY iconv REQUIRED)
+find_library(IOS_ICUCORE_LIBRARY icucore REQUIRED)
 
 # Compiler
 set(CMAKE_C_STANDARD 99)
@@ -351,12 +352,16 @@ target_link_libraries(butterscotch PRIVATE
     ${IOS_UNIFORMTYPEIDENTIFIERS_FRAMEWORK}
     ${IOS_VIDEOTOOLBOX_FRAMEWORK}
     ${IOS_Z_LIBRARY}
-    ${IOS_ICONV_LIBRARY}
     "${FFMPEG_DIR}/avcodec/avcodec.xcframework"
     "${FFMPEG_DIR}/avformat/avformat.xcframework"
     "${FFMPEG_DIR}/avutil/avutil.xcframework"
     "${FFMPEG_DIR}/swscale/swscale.xcframework"
     "${FFMPEG_DIR}/swresample/swresample.xcframework"
+)
+
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-w>
+    $<$<COMPILE_LANGUAGE:Swift>:-suppress-warnings>
 )
 
 if(IOS_GAMECONTROLLER_FRAMEWORK)
@@ -410,6 +415,134 @@ set_target_properties(butterscotch PROPERTIES
 
     XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
 )
+
+# C# / dotnet NativeAOT
+set(CSHARP_PROJECT
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/cs/Butterscotch.CSharp.csproj"
+)
+
+if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+    set(CSHARP_RUNTIME_ID "iossimulator-arm64")
+else()
+    set(CSHARP_RUNTIME_ID "ios-arm64")
+endif()
+
+message("-- C# Runtime ID is: ${CSHARP_RUNTIME_ID}")
+
+set(CSHARP_OUTPUT
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/cs/bin/net9.0/${CSHARP_RUNTIME_ID}/native/Butterscotch.CSharp.a"
+)
+
+find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
+
+add_custom_target(dotnet-aot ALL
+    COMMAND
+        ${DOTNET_EXECUTABLE} publish
+        "${CSHARP_PROJECT}"
+        --configuration $<CONFIG>
+        --framework net9.0
+        --runtime ${CSHARP_RUNTIME_ID}
+        --output "${CMAKE_CURRENT_BINARY_DIR}/cs"
+    WORKING_DIRECTORY
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+    VERBATIM
+)
+
+add_library(ButterscotchCSharp SHARED IMPORTED GLOBAL)
+
+set_target_properties(ButterscotchCSharp PROPERTIES
+    IMPORTED_LOCATION
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/cs/bin/Debug/net9.0/iossimulator-arm64/native/dotnet-aot.dylib"
+)
+
+if(APPLE)
+    set(DOTNET_NUGET_CACHE "$ENV{HOME}/.nuget/packages")
+else()
+    execute_process(
+        COMMAND ${DOTNET_EXECUTABLE} nuget locals global-packages --list
+        OUTPUT_VARIABLE DOTNET_NUGET_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    string(REGEX REPLACE "^[^:]+:[ \t]*" "" DOTNET_NUGET_CACHE
+        "${DOTNET_NUGET_OUTPUT}"
+    )
+endif()
+
+file(GLOB DOTNET_NATIVEAOT_PACKS
+    "${DOTNET_NUGET_CACHE}/microsoft.netcore.app.runtime.nativeaot.${CSHARP_RUNTIME_ID}/9.0.*"
+)
+
+if(NOT DOTNET_NATIVEAOT_PACKS)
+    message(FATAL_ERROR
+        "Could not find NativeAOT runtime pack for ${CSHARP_RUNTIME_ID}\n"
+        "Searched: ${DOTNET_NUGET_CACHE}"
+    )
+endif()
+
+list(SORT DOTNET_NATIVEAOT_PACKS COMPARE NATURAL ORDER DESCENDING)
+list(GET DOTNET_NATIVEAOT_PACKS 0 DOTNET_NATIVEAOT_PACK)
+
+set(DOTNET_NATIVE_DIR
+    "${DOTNET_NATIVEAOT_PACK}/runtimes/${CSHARP_RUNTIME_ID}/native"
+)
+
+message(STATUS "NativeAOT runtime: ${DOTNET_NATIVE_DIR}")
+
+if(NOT EXISTS "${DOTNET_NATIVE_DIR}/libbootstrapper.o")
+    message(FATAL_ERROR
+        "NativeAOT bootstrapper not found:\n"
+        "  ${DOTNET_NATIVE_DIR}/libbootstrapper.o"
+    )
+endif()
+
+set(DOTNET_NATIVE_LIBS
+    "${DOTNET_NATIVE_DIR}/libSystem.Globalization.Native.a"
+    "${DOTNET_NATIVE_DIR}/libSystem.IO.Compression.Native.a"
+    "${DOTNET_NATIVE_DIR}/libSystem.Native.a"
+    "${DOTNET_NATIVE_DIR}/libSystem.Net.Security.Native.a"
+    "${DOTNET_NATIVE_DIR}/libSystem.Security.Cryptography.Native.Apple.a"
+    "${DOTNET_NATIVE_DIR}/libstdc++compat.a"
+    "${DOTNET_NATIVE_DIR}/libRuntime.WorkstationGC.a"
+    "${DOTNET_NATIVE_DIR}/libeventpipe-disabled.a"
+    ${IOS_ICONV_LIBRARY}
+    ${IOS_ICUCORE_LIBRARY}
+)
+
+#target_sources(butterscotch PRIVATE "${DOTNET_NATIVE_DIR}/libbootstrapper.o")
+target_link_libraries(butterscotch PRIVATE 
+    ButterscotchCSharp
+    ${DOTNET_NATIVE_LIBS}
+)
+
+set(DOTNET_BOOTSTRAP
+    "${CMAKE_CURRENT_BINARY_DIR}/libbootstrapper-renamed.o"
+)
+
+add_custom_command(
+    OUTPUT "${DOTNET_BOOTSTRAP}"
+    COMMAND
+        xcrun ld -r
+        "${DOTNET_NATIVE_DIR}/libbootstrapper.o"
+        -o "${DOTNET_BOOTSTRAP}"
+        -alias _main _butterscotch_dotnet_bootstrap
+        -unexported_symbol _main
+    DEPENDS
+        "${DOTNET_NATIVE_DIR}/libbootstrapper.o"
+    VERBATIM
+)
+
+
+add_custom_target(dotnet-bootstrap ALL
+    DEPENDS "${DOTNET_BOOTSTRAP}"
+)
+
+add_dependencies(butterscotch dotnet-bootstrap)
+
+#target_sources(butterscotch PRIVATE
+#    "${DOTNET_BOOTSTRAP}"
+#)
+
 
 # iOS asset catalog
 set(IOS_ASSET_CATALOG "${CMAKE_BINARY_DIR}/ButterscotchAssets.xcassets")

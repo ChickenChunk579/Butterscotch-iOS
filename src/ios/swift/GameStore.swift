@@ -7,7 +7,8 @@ struct Game: Identifiable, Codable, Equatable {
 
     var name: String
     var description: String
-
+    var steamAppID: String
+    
     var dataWinRel: String
     var dirRel: String
     var saveDirRel: String

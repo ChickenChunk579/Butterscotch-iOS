@@ -161,6 +161,7 @@ extension GamesView {
                                 .deletingPathExtension()
                                 .lastPathComponent,
                         description: "",
+                        steamAppID: "",
                         dataWinRel: dataWinRel,
                         dirRel: identifier,
                         saveDirRel:
