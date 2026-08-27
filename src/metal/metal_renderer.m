@@ -248,11 +248,7 @@ void metalUploadDefaultUniforms(MetalRenderer* metal) {
 
 void metalBindDrawState(MetalRenderer* metal) {
     if (metal->encoder == nil) return;
-    logInfo("Metal draw: shader=%d fog=%d fogColor=%08x\n",
-        metal->base.currentShader,
-        metal->fogEnable,
-        metal->fogColor);
-        
+
     id<MTLRenderPipelineState> pipeline = metalGetPipeline(metal);
     [metal->encoder setRenderPipelineState:pipeline];
 

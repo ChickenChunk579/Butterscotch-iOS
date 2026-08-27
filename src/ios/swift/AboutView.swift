@@ -9,7 +9,7 @@ struct AboutView: View {
                 .scaledToFit()
                 .frame(maxWidth: .infinity)
 
-            Text("Butterscotch Runner")
+            Text("Butterscotch iOS")
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
@@ -20,12 +20,12 @@ struct AboutView: View {
             Divider()
 
             
-            Text("An open source re-implementation of GameMaker: Studio's runner (YoYo Runner)")
+            Text("A fork of Butterscotch runner, an open source re-implementation of GameMaker: Studio's runner (YoYo Runner), adding iOS support")
 
             HStack {
-                Link("GitHub", destination: URL(string: "https://github.com/...")!)
+                Link("GitHub", destination: URL(string: "https://github.com/ChickenChunk579/Butterscotch-iOS")!)
                 
-                //Link("Website", destination: URL(string: "https://...")!)
+                Link("Upstream", destination: URL(string: "https://github.com/ButterscotchRunner/Butterscotch")!)
             }
             .frame(maxWidth: .infinity)
         }

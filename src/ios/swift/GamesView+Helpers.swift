@@ -8,3 +8,11 @@ extension GamesView {
         errorMessage = message
     }
 }
+
+func getRelativeDateString(from date: Date) -> String {
+    let formatter = RelativeDateTimeFormatter()
+    formatter.dateTimeStyle = .named
+    formatter.unitsStyle = .full
+    
+    return formatter.localizedString(for: date, relativeTo: Date())
+}

@@ -19,7 +19,7 @@ struct LauncherView: View {
                 .tabItem {
                     Label(
                         "Library",
-                        systemImage: "play.fill"
+                        systemImage: "books.vertical.fill"
                     )
                 }
                 .tag(1)

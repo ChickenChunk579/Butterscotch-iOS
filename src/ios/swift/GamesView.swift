@@ -155,42 +155,62 @@ struct GamesView: View {
     // MARK: - Game Library
 
     private var gameLibrary: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [
-                    GridItem(
-                        .adaptive(
-                            minimum: 180,
-                            maximum: 320
-                        ),
-                        spacing: 18
-                    )
-                ],
-                spacing: 24
-            ) {
-                ForEach(store.games) { game in
+        GeometryReader { geometry in
+            let width = geometry.size.width
 
-                    NavigationLink {
-                        GameDetailView(
-                            game: game,
-                            onPlay: {
-                                play(game)
-                            }
-                        )
-                    } label: {
-                        GameCard(game: game)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        gameContextMenu(for: game)
+            // Adjust these breakpoints to your liking
+            let columnCount: Int = {
+                if width < 700 {
+                    return 2
+                } else {
+                    return 4
+                }
+            }()
+
+            let spacing: CGFloat = 12
+            let horizontalPadding: CGFloat = 16
+
+            let availableWidth =
+                width
+                - (horizontalPadding * 2)
+                - (spacing * CGFloat(columnCount - 1))
+
+            let cardWidth = availableWidth / CGFloat(columnCount)
+
+            ScrollView {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(
+                            .fixed(cardWidth),
+                            spacing: spacing
+                        ),
+                        count: columnCount
+                    ),
+                    spacing: 24
+                ) {
+                    ForEach(store.games) { game in
+                        NavigationLink {
+                            GameDetailView(
+                                game: game,
+                                onPlay: {
+                                    play(game)
+                                }
+                            )
+                        } label: {
+                            GameCard(game: game)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            gameContextMenu(for: game)
+                        }
                     }
                 }
+                .padding(.horizontal, horizontalPadding)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
             }
-            .padding(.horizontal)
-            .padding(.top, 12)
-            .padding(.bottom, 24)
+            .scrollIndicators(.hidden)
         }
-        .scrollIndicators(.hidden)
     }
 
     // MARK: - Context Menu
@@ -259,15 +279,15 @@ struct GameCard: View {
 
     let game: Game
 
-    private let steamGridDB: SteamGridDB
+    let artProvider: GameArtProvider
 
-    @State private var heroURL: URL?
+    @State private var boxartURL: URL?
     @State private var isPressed = false
 
     init(game: Game) {
         self.game = game
-        self.steamGridDB = SteamGridDB(
-            apiKey: "54d085cdf879d930050b2e43558e9841"
+        self.artProvider = GameArtProvider(
+            steamGridDBAPIKey: "54d085cdf879d930050b2e43558e9841"
         )
     }
 
@@ -304,18 +324,12 @@ struct GameCard: View {
                     )
                 )
 
-                // SteamGridDB artwork
+                // Box art
                 ZStack {
-                    // Glow
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.accentColor)
-                        .blur(radius: 14)
-                        .opacity(0.7)
-
                     // Artwork
                     Group {
-                        if let heroURL {
-                            AsyncImage(url: heroURL) { phase in
+                        if let boxartURL {
+                            CachedAsyncImage(url: boxartURL) { phase in
                                 switch phase {
                                 case .success(let image):
                                     image
@@ -362,35 +376,34 @@ struct GameCard: View {
                 6/9,
                 contentMode: .fit
             )
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius: 14
-                )
+            .compositingGroup()
+            .shadow(
+                color: BSTheme.accent.opacity(0.85),
+                radius: 12,
+                x: 0,
+                y: 0
             )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: 14
-                )
-                .stroke(
-                    .white.opacity(
-                        isPressed ? 0.25 : 0
-                    ),
-                    lineWidth: 1
-                )
-            }
             .shadow(
                 color: .black.opacity(0.18),
                 radius: 8,
                 y: 5
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(
+                        .white.opacity(isPressed ? 0.25 : 0),
+                        lineWidth: 1
+                    )
+            }
 
             Text(game.name)
                 .font(.headline)
                 .lineLimit(1)
 
-            Text(game.description)
+            Text(game.developers)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .scaleEffect(
             isPressed ? 0.97 : 1
@@ -401,12 +414,10 @@ struct GameCard: View {
         )
         .task {
             do {
-                heroURL = try await steamGridDB.gridURL(
-                    forSteamAppID: Int(game.steamAppID)
-                )
+                boxartURL = try await artProvider.gridURL(for: game)
             } catch {
                 print(
-                    "Failed to load SteamGridDB artwork:",
+                    "Failed to load game artwork:",
                     error
                 )
             }
@@ -418,10 +429,10 @@ struct GameCard: View {
 // MARK: - Game Detail View
 
 struct GameDetailView: View {
-    let game: Game
+    @State var game: Game
     let onPlay: () -> Void
 
-    private let steamGridDB: SteamGridDB
+    let artProvider: GameArtProvider
 
     @State private var heroURL: URL?
     @State private var logoURL: URL?
@@ -429,7 +440,7 @@ struct GameDetailView: View {
     init(game: Game, onPlay: @escaping () -> Void) {
         self.game = game
         self.onPlay = onPlay
-        self.steamGridDB = SteamGridDB(apiKey:"54d085cdf879d930050b2e43558e9841")
+        self.artProvider = GameArtProvider(steamGridDBAPIKey: "54d085cdf879d930050b2e43558e9841")
         self._heroURL = State(initialValue: nil)
     }
     
@@ -486,80 +497,49 @@ struct GameDetailView: View {
                     )
                 )
 
-            // Hero artwork
-            Group {
-                if let heroURL {
-                    AsyncImage(url: heroURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
+            if let heroURL {
+                CachedAsyncImage(url: heroURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 22)
+                            )
 
-                        case .failure, .empty:
-                            fallbackIcon
+                    case .failure:
+                        fallbackIcon
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 250)
+                            .background(Color.gray.opacity(0.1))
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 22)
+                            )
 
-                        @unknown default:
-                            fallbackIcon
-                        }
+                    case .empty:
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 250)
+
+                    @unknown default:
+                        EmptyView()
                     }
-                } else {
-                    fallbackIcon
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipShape(
-                RoundedRectangle(cornerRadius: 22)
-            )
-
-            // Title
-            Group {
-                if let logoURL {
-                    AsyncImage(url: logoURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFit()
-
-                        case .failure, .empty:
-                            Text(game.name)
-                                .font(.largeTitle.bold())
-                                .foregroundStyle(.white)
-
-                        @unknown default:
-                            Text(game.name)
-                                .font(.largeTitle.bold())
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    Text(game.name)
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.white)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 18)
         }
         .task {
             do {
-                heroURL = try await steamGridDB.heroURL(
-                    forSteamAppID: Int(game.steamAppID)
-                )
-
-                logoURL = try await steamGridDB.logoURL(
-                    forSteamAppID: Int(game.steamAppID)
-                )
+                heroURL = try await artProvider.heroURL(for: game)
+                logoURL = try await artProvider.logoURL(for: game)
             } catch {
-                print("Failed to load SteamGridDB artwork:", error)
+                print("Failed to load game artwork:", error)
             }
         }
         .frame(
             maxWidth: .infinity
         )
-        .frame(height: 360)
         .clipShape(
             RoundedRectangle(
                 cornerRadius: 22
@@ -574,43 +554,272 @@ struct GameDetailView: View {
     }
 
     // MARK: - About
+    
+    private var playButton: some View {
+        Button(action: {
+            let startTime = Date.now
+            onPlay()
+            game.lastPlayed = Date.now
+            
+            let range = Duration.seconds(game.lastPlayed.timeIntervalSince(startTime))
+            
+            game.playTime += range
+            
+            GameStore.shared.update(game)
+        }) {
+            HStack(spacing: 9) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 20, weight: .bold))
+
+                Text("Play")
+                    .font(.system(size: 20, weight: .bold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .background {
+                RoundedRectangle(
+                    cornerRadius: 14,
+                    style: .continuous
+                )
+                .fill(BSTheme.accent)
+            }
+            .shadow(
+                color: BSTheme.accent.opacity(0.25),
+                radius: 10,
+                y: 5
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private var gameInformation: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(
+                title: "Game Information",
+                icon: "info.circle"
+            )
+
+            // Add alignment: .leading here
+            VStack(alignment: .leading, spacing: 9) {
+                infoRow(title: "Developers", value: game.developers)
+                infoRow(title: "Publisher", value: game.publisher)
+                infoRow(title: "Release Date", value: getRelativeDateString(from: game.releaseDate))
+                infoRow(title: "Genres", value: game.genres)
+                infoRow(title: "Platforms", value: game.platforms)
+            }
+        }
+    }
+
+    
+    private var categories: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(
+                title: "Categories",
+                icon: "square.grid.2x2"
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    categoryTag("Single-player")
+                    categoryTag("Multiplayer")
+                }
+
+                categoryTag("Steam Achievements")
+            }
+        }
+    }
 
     private var about: some View {
+        VStack(alignment: .leading, spacing: 20) {
+
+            // MARK: - Play + Stats
+
+            ViewThatFits(in: .horizontal) {
+                // Desktop
+                HStack(spacing: 14) {
+                    playButton
+                        .frame(width: 256)
+
+                    statCard(
+                        title: "Play time",
+                        value: game.playTime.formatted(
+                            .units(allowed: [.hours, .minutes], width: .narrow)
+                        ),
+                        icon: "clock.fill"
+                    )
+
+                    statCard(
+                        title: "Last Played",
+                        value: getRelativeDateString(from: game.lastPlayed),
+                        icon: "calendar"
+                    )
+                }
+
+                // Smaller screens
+                VStack(spacing: 12) {
+                    playButton
+                        .frame(height: 56)
+
+                    HStack(spacing: 12) {
+                        statCard(
+                            title: "Play time",
+                            value: game.playTime.formatted(
+                                .units(allowed: [.hours, .minutes], width: .narrow)
+                            ),
+                            icon: "clock.fill"
+                        )
+
+                        statCard(
+                            title: "Last Played",
+                            value: getRelativeDateString(from: game.lastPlayed),
+                            icon: "calendar"
+                        )
+                    }
+                }
+            }
+
+            // MARK: - About
+
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader(
+                    title: "About",
+                    icon: "text.alignleft"
+                )
+
+                Text(game.description)
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(2)
+                    .lineLimit(4)
+            }
+
+            // MARK: - Information + Categories
+
+            ViewThatFits(in: .horizontal) {
+                // iPad / wider layouts
+                HStack(alignment: .top, spacing: 20) {
+                    gameInformation
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    categories
+                        .frame(width: 220, alignment: .leading)
+                }
+
+                // iPhone / narrower layouts
+                VStack(alignment: .leading, spacing: 20) {
+                    gameInformation
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    categories
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(18)
+            .background {
+                RoundedRectangle(
+                    cornerRadius: 18,
+                    style: .continuous
+                )
+                .fill(.quaternary.opacity(0.35))
+            }
+        }
+    }
+
+    // MARK: - Section Header
+
+    private func sectionHeader(
+        title: String,
+        icon: String
+    ) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(BSTheme.accent)
+
+            Text(title)
+                .font(.headline)
+                .fontWeight(.bold)
+        }
+    }
+
+    // MARK: - Section Background
+
+    private var sectionBackground: some View {
+        RoundedRectangle(
+            cornerRadius: 20,
+            style: .continuous
+        )
+        .fill(.quaternary.opacity(0.45))
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: 20,
+                style: .continuous
+            )
+            .stroke(
+                .primary.opacity(0.06),
+                lineWidth: 1
+            )
+        }
+    }
+    private func infoRow(
+        title: String,
+        value: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title)
+                .foregroundStyle(.secondary)
+                .frame(width: 110, alignment: .leading)
+
+            Text(value)
+                .fontWeight(.medium)
+        }
+    }
+
+    private func statCard(
+        title: String,
+        value: String,
+        icon: String
+    ) -> some View {
         VStack(
             alignment: .leading,
-            spacing: 12
+            spacing: 8
         ) {
-            Button(action: onPlay) {
-                HStack(spacing: 10) {
-                    Image(systemName: "play.fill")
-                    Text("Play")
-                        .fontWeight(.semibold)
-                }
-                .foregroundStyle(.white)
-                .frame(maxWidth: 128)
-                .padding(.vertical, 14)
-                .background {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(BSTheme.accent)
-                }
-                .shadow(
-                    color: BSTheme.accent.opacity(0.3),
-                    radius: 10,
-                    y: 5
-                )
-            }
-            .buttonStyle(.plain)
+            Image(systemName: icon)
+                .font(.subheadline)
+                .foregroundStyle(BSTheme.accent)
 
-            Text("About")
-                .font(.title2)
-                .fontWeight(.bold)
+            Text(value)
+                .font(.headline)
 
-            Text(
-                game.description
-            )
-            .font(.body)
-            .foregroundStyle(.secondary)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background {
+            RoundedRectangle(
+                cornerRadius: 14,
+                style: .continuous
+            )
+            .fill(Color.primary.opacity(0.05))
+        }
+    }
+
+    private func categoryTag(
+        _ title: String
+    ) -> some View {
+        Text(title)
+            .font(.caption)
+            .fontWeight(.medium)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background {
+                Capsule()
+                    .fill(Color.primary.opacity(0.06))
+            }
     }
 }
 

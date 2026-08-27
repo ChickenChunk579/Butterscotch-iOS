@@ -46,7 +46,7 @@ static void platformUpdateFPS(void) {
     uint64_t frequency = SDL_GetPerformanceFrequency();
     double elapsed = (double)(now - fpsLastTime) / (double)frequency;
 
-    if (elapsed >= 0.5) {
+    if (elapsed >= 0.01) {
         double fps = (double)fpsFrames / elapsed;
 
         IOSTouchControls_setFPS(fps);

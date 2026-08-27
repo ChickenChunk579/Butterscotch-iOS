@@ -7,8 +7,6 @@
 #include <stdarg.h>
 #include <log.h>
 
-#include "csharp.h"
-
 void platformLog(const logType type, const char *format, va_list va) {
     FILE *out = stderr;
     const char *textPrefix = "";
@@ -198,7 +196,6 @@ int IOSLauncher_startGame(const char *dataWinPath, const char *saveFolder,
     args.disableLogColours = settings->disableLogColours;
 
     fprintf(stderr, "iOS: calling loop()\n");
-    fprintf(stderr, "iOS: 1 + 1 = %d\n", steamkit2(1, 1));
 
     int ret = loop(args, "");
 

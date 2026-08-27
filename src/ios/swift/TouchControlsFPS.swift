@@ -5,34 +5,15 @@ struct FPSVisual: View {
     let fps: Double
 
     var body: some View {
-
-        Text(
-            String(
-                format: "FPS: %.0f",
-                fps
+        Text(String(format: "%.0f FPS", fps))
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(width: 110)
+            .background(.ultraThinMaterial)
+            .clipShape(
+                RoundedRectangle(cornerRadius: 12)
             )
-        )
-        .font(
-            .system(
-                size: 16,
-                weight: .bold
-            )
-        )
-        .foregroundStyle(.white)
-        .frame(
-            width: 90,
-            height: 32
-        )
-        .background(
-            Color(
-                white: 0.05,
-                opacity: 0.60
-            )
-        )
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: 8
-            )
-        )
     }
 }

@@ -6,12 +6,24 @@ struct Game: Identifiable, Codable, Equatable {
     let id: String
 
     var name: String
+    var developers: String
+    var publisher: String
     var description: String
+    var genres: String
+    var platforms: String
+    var categories: [String]
     var steamAppID: String
+    var fetchFromSteam: Bool
     
     var dataWinRel: String
     var dirRel: String
     var saveDirRel: String
+    
+    var playTime: Duration = .seconds(0)
+    var lastPlayed: Date = Date.now
+    
+    var releaseDate: Date = Date.now
+    
 
     var iconRel: String?
 }
