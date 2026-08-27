@@ -8,3 +8,4 @@ compat/config.mk
 *.log
 .DS_store
 android/.gradle
+android/java_pid*.hprof
