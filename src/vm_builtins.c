@@ -17361,6 +17361,7 @@ static RValue builtin_sprite_get_info(VMContext* ctx, RValue* args, int32_t argC
     return RValue_makeStructAndIncRef(ret);
 }
 
+#ifdef USE_FFMPEG
 // ===[ VIDEO ]===
 #include <stdio.h>
 #include <stdlib.h>
@@ -17907,7 +17908,7 @@ static RValue builtin_video_pause(VMContext* ctx, RValue* args, int32_t argCount
     return RValue_makeUndefined();
 }
 
-
+#endif
 
 // ===[ REGISTRATION ]===
 
@@ -19045,6 +19046,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "texture_get_uvs", builtin_texture_get_uvs);
     VM_registerBuiltin(ctx, "texture_set_stage", builtin_texture_set_stage);
     VM_registerBuiltin(ctx, "sprite_get_info", builtin_sprite_get_info);
+    
+#ifdef USE_FFMPEG
     VM_registerBuiltin(ctx, "video_open", builtin_video_open);
     VM_registerBuiltin(ctx, "video_close", builtin_video_close);
     VM_registerBuiltin(ctx, "video_pause", builtin_video_pause);
@@ -19058,5 +19061,5 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "video_get_volume", builtin_video_get_volume);
     VM_registerBuiltin(ctx, "video_set_volume", builtin_video_set_volume);
     VM_registerBuiltin(ctx, "video_enable_loop", builtin_video_enable_loop);
-
+#endif
 }

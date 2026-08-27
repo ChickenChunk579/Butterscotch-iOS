@@ -37,3 +37,19 @@ cmake -S . -B build-ios-simulator \
   -DENABLE_MODERN_GL=ON \
   -DENABLE_METAL=ON \
   -DAUDIO_BACKEND=miniaudio
+
+
+
+cmake -S . -B build-droid \
+  -G Ninja \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_SYSTEM_NAME=Android \
+  -DCMAKE_TOOLCHAIN_FILE=$HOME/Library/Android/sdk/ndk/30.0.16138531/build/cmake/android.toolchain.cmake \
+  -DANDROID_SDK_ROOT=$HOME/Library/Android/sdk \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-37.0 \
+  -DENABLE_LEGACY_GL=OFF \
+  -DENABLE_MODERN_GL=ON \
+  -DENABLE_METAL=OFF \
+  -DBACKEND=sdl2 \
+  -DAUDIO_BACKEND=miniaudio

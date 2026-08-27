@@ -68,6 +68,11 @@
 #include "vita_textures.h"
 #endif
 
+#ifdef __ANDROID__
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#endif
+
 enum GraphicsAPI gfx;
 
 #if defined(ENABLE_LEGACY_GL) || defined(ENABLE_MODERN_GL)
@@ -158,7 +163,7 @@ static bool platformInitGlad(void) {
 }
 #endif
 
-#if (defined(ENABLE_MODERN_GL) || defined(ENABLE_LEGACY_GL)) && !defined(NDEBUG) && !defined(PLATFORM_VITA) && !defined(BUTTERSCOTCH_PLATFORM_IOS)
+#if (defined(ENABLE_MODERN_GL) || defined(ENABLE_LEGACY_GL)) && !defined(NDEBUG) && !defined(PLATFORM_VITA) && !defined(BUTTERSCOTCH_PLATFORM_IOS) && !defined(__ANDROID__)
 #define USE_OPENGL_DEBUG
 static void APIENTRY glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, MAYBE_UNUSED GLsizei length, const GLchar* message, MAYBE_UNUSED const void* userParam) {
     const char* sourceStr;
@@ -1279,8 +1284,10 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // Only swap when there isn't a room change to match the original runner.
                 if (runner->pendingRoom == -1 || gfx == METAL)
                     platformSwapBuffers();
+                #ifdef ENABLE_METAL
                 if (runner->pendingRoom != -1 && gfx == METAL)
                     MetalRenderer_waitForPresentedFrame();
+                #endif
                 Runner_handlePendingRoomChange(runner);
             }
 

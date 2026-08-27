@@ -4,8 +4,10 @@
 #include "common.h"
 #include "renderer.h"
 #include "runner.h"
-#if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(__APPLE__)
+#if defined(__APPLE__)
 #include <OpenGLES/ES3/gl.h>
+#elif defined(__ANDROID__)
+#include <GLES3/gl3.h>
 #elif PLATFORM_VITA
 #include <vitaGL.h>
 #define GL_BOOL 0x8B56

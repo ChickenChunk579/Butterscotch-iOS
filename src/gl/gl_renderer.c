@@ -2,8 +2,32 @@
 #include "matrix_math.h"
 #include "text_utils.h"
 
-#if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(__APPLE__)
+#if defined(__APPLE__)
 #include <OpenGLES/ES3/gl.h>
+#elif defined(__ANDROID__)
+#include <GLES3/gl3.h>
+#include <GLES3/gl3ext.h>
+#include <EGL/egl.h>
+
+extern void glGenVertexArraysOES(GLsizei n, GLuint *arrays);
+extern void glBindVertexArrayOES(GLuint array);
+extern void glDeleteVertexArraysOES(GLsizei n, const GLuint *arrays);
+
+void (*android_glBlitFramebuffer)(
+    GLint srcX0, GLint srcY0,
+    GLint srcX1, GLint srcY1,
+    GLint dstX0, GLint dstY0,
+    GLint dstX1, GLint dstY1,
+    GLbitfield mask,
+    GLenum filter
+);
+
+#define glBlitFramebuffer android_glBlitFramebuffer
+
+#define glGenVertexArrays    glGenVertexArraysOES
+#define glBindVertexArray   glBindVertexArrayOES
+#define glDeleteVertexArrays glDeleteVertexArraysOES
+
 #elif PLATFORM_VITA
 #include <vitaGL.h>
 #include "vita_textures.h"
@@ -425,6 +449,16 @@ static bool compileProgram(GMLShader* gmlShader, const char* name, const char* v
 static void glInit(Renderer* renderer, DataWin* dataWin) {
     GLRenderer* gl = (GLRenderer*) renderer;
     renderer->dataWin = dataWin;
+
+    #if defined(__ANDROID__)
+
+    android_glBlitFramebuffer =
+        (void (*)(GLint, GLint, GLint, GLint,
+                GLint, GLint, GLint, GLint,
+                GLbitfield, GLenum))
+        eglGetProcAddress("glBlitFramebuffer");
+
+#endif
 
     // SDL's UIKit backend presents a non-zero EAGL drawable framebuffer.
     // Capture it while SDL's GL context is current; FBO 0 is not visible on
